@@ -15,6 +15,8 @@ import Big from "big.js";
 interface SessionData {
   step: string;
   data: any;
+  lastMessageId?: number;
+  userMessageIds?: number[];
 }
 
 @Injectable()
@@ -351,15 +353,17 @@ export class TelegramBotService implements OnModuleInit {
       }
 
       // 启动转账会话
-      this.userSessions.set(msg.from.id, {
+      const transferSession: SessionData = {
         step: "transfer_address",
         data: {
           chatId: chatId.toString(),
         },
-      });
+      };
+      this.userSessions.set(msg.from.id, transferSession);
 
-      this.bot.sendMessage(
+      await this.sendAndDeleteOld(
         chatId,
+        transferSession,
         `
 💸 普通转账
 
@@ -386,13 +390,14 @@ export class TelegramBotService implements OnModuleInit {
       }
 
       // 启动发红包会话
-      this.userSessions.set(msg.from.id, {
+      const session: SessionData = {
         step: "send_packet_type",
         data: {
           chatId: chatId.toString(),
           chatTitle: msg.chat.title || "Private Chat",
         },
-      });
+      };
+      this.userSessions.set(msg.from.id, session);
 
       const keyboard = {
         reply_markup: {
@@ -421,7 +426,11 @@ export class TelegramBotService implements OnModuleInit {
         },
       };
 
-      this.bot.sendMessage(chatId, "🧧 请选择红包类型：", keyboard);
+      this.bot
+        .sendMessage(chatId, "🧧 请选择红包类型：", keyboard)
+        .then((msg) => {
+          session.lastMessageId = msg.message_id;
+        });
     });
   }
 
@@ -442,8 +451,9 @@ export class TelegramBotService implements OnModuleInit {
           // 定向红包需要先选择目标用户
           if (type === RedPacketType.DIRECT) {
             session.step = "send_packet_target_users";
-            this.bot.sendMessage(
+            await this.sendAndDeleteOld(
               chatId,
+              session,
               `
 🎯 请输入目标用户的 Telegram 用户名（@username）
 
@@ -460,8 +470,9 @@ export class TelegramBotService implements OnModuleInit {
               type === RedPacketType.ACTIVITY_TOP
                 ? "🔥 活跃红包"
                 : "🎰 抽奖红包";
-            this.bot.sendMessage(
+            await this.sendAndDeleteOld(
               chatId,
+              session,
               `
 ${label} 请输入中奖人数：
 
@@ -471,8 +482,9 @@ ${label} 请输入中奖人数：
           } else {
             // 群红包直接问金额
             session.step = "send_packet_amount";
-            this.bot.sendMessage(
+            await this.sendAndDeleteOld(
               chatId,
+              session,
               `
 💰 请输入红包总金额（单位：SCASH）：
 
@@ -545,6 +557,13 @@ ${label} 请输入中奖人数：
       if (data === "confirm_send_packet") {
         const session = this.userSessions.get(userId);
         if (session && session.step === "send_packet_confirm") {
+          // 删除确认消息
+          if (query.message) {
+            try {
+              await this.bot.deleteMessage(chatId, query.message.message_id);
+            } catch (e) {}
+          }
+
           const user = await this.getOrCreateUser(query.from);
 
           const result = await this.redpacketService.createRedPacket({
@@ -561,19 +580,20 @@ ${label} 请输入中奖人数：
           });
 
           if (result.success) {
-            this.bot.sendMessage(
-              chatId,
-              `✅ 红包创建成功！\n\n交易哈希: \`${result.txid}\``,
-              {
-                parse_mode: "Markdown",
-              },
-            );
-
-            // 在群里发送红包消息
             if (session.data.chatId.startsWith("-")) {
               await this.sendRedPacketToGroup(
                 result.redPacket,
                 session.data.chatId,
+                result.txid,
+              );
+              await this.deleteUserMessages(session.data.chatId, session);
+            } else {
+              this.bot.sendMessage(
+                chatId,
+                `✅ 红包创建成功！\n\n交易哈希: \`${result.txid}\``,
+                {
+                  parse_mode: "Markdown",
+                },
               );
             }
 
@@ -584,8 +604,93 @@ ${label} 请输入中奖人数：
         }
       }
 
+      // 跳过留言
+      if (data === "skip_message") {
+        const session = this.userSessions.get(userId);
+        if (session && session.step === "send_packet_message") {
+          session.data.message = "恭喜发财，大吉大利！";
+
+          if (
+            session.data.type === RedPacketType.GROUP_EQUAL ||
+            session.data.type === RedPacketType.GROUP_RANDOM ||
+            session.data.type === RedPacketType.ACTIVITY_LOTTERY
+          ) {
+            session.data.strategy =
+              session.data.type === RedPacketType.GROUP_EQUAL
+                ? RedPacketStrategy.EQUAL
+                : RedPacketStrategy.RANDOM;
+          }
+
+          session.step = "send_packet_confirm";
+
+          // 删除确认消息
+          if (query.message) {
+            try {
+              await this.bot.deleteMessage(chatId, query.message.message_id);
+            } catch (e) {}
+          }
+
+          // 显示确认信息
+          let confirmMessage = `
+📋 请确认红包信息：
+
+类型: ${this.getPacketTypeLabel(session.data.type)}
+金额: ${session.data.amount} SCASH
+份数: ${session.data.count}
+留言: ${session.data.message}
+`;
+
+          if (
+            session.data.type === RedPacketType.DIRECT &&
+            session.data.targetUsers
+          ) {
+            confirmMessage += `\n目标用户: @${session.data.targetUsers.join(", @")}`;
+          }
+
+          if (
+            (session.data.type === RedPacketType.ACTIVITY_TOP ||
+              session.data.type === RedPacketType.ACTIVITY_LOTTERY) &&
+            session.data.topN
+          ) {
+            confirmMessage += `\n中奖人数: ${session.data.topN}`;
+          }
+
+          const networkFee = 0.00001;
+          const isGroupRedPacket =
+            session.data.type === RedPacketType.GROUP_EQUAL ||
+            session.data.type === RedPacketType.GROUP_RANDOM ||
+            session.data.type === RedPacketType.ACTIVITY_LOTTERY;
+
+          let reserveFee = 0;
+          if (isGroupRedPacket) {
+            reserveFee = session.data.count * 0.0023;
+          }
+
+          const totalFee = networkFee + reserveFee;
+          const totalAmount = parseFloat(session.data.amount) + totalFee;
+
+          confirmMessage += `\n\n预估手续费: ~${totalFee.toFixed(4)} SCASH`;
+          confirmMessage += `\n总金额: ${totalAmount.toFixed(4)} SCASH`;
+
+          await this.sendAndDeleteOld(chatId, session, confirmMessage, {
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  { text: "✅ 确认发送", callback_data: "confirm_send_packet" },
+                  { text: "❌ 取消", callback_data: "cancel_send_packet" },
+                ],
+              ],
+            },
+          });
+        }
+      }
+
       // 取消发送
       if (data === "cancel_send_packet") {
+        const session = this.userSessions.get(userId);
+        if (session && session.data.chatId) {
+          await this.deleteUserMessages(session.data.chatId, session);
+        }
         this.userSessions.delete(userId);
         this.bot.sendMessage(chatId, "❌ 已取消发送红包");
       }
@@ -594,6 +699,13 @@ ${label} 请输入中奖人数：
       if (data === "confirm_transfer") {
         const session = this.userSessions.get(userId);
         if (session && session.step === "transfer_confirm") {
+          // 删除确认消息
+          if (query.message) {
+            try {
+              await this.bot.deleteMessage(chatId, query.message.message_id);
+            } catch (e) {}
+          }
+
           const user = await this.getOrCreateUser(query.from);
 
           // 使用 redpacketService 的 createRedPacket 方法发送转账
@@ -628,6 +740,7 @@ ${label} 请输入中奖人数：
               );
 
             if (broadcastResult.success) {
+              await this.deleteUserMessages(session.data.chatId, session);
               this.bot.sendMessage(
                 chatId,
                 `✅ 转账成功！\n\n收款地址: \`${session.data.recipientAddress}\`\n金额: ${session.data.amount} SCASH\n手续费: ${buildResult.fee.toFixed(8)} SCASH\n交易哈希: \`${broadcastResult.txid}\``,
@@ -649,6 +762,10 @@ ${label} 请输入中奖人数：
 
       // 取消转账
       if (data === "cancel_transfer") {
+        const session = this.userSessions.get(userId);
+        if (session && session.data.chatId) {
+          await this.deleteUserMessages(session.data.chatId, session);
+        }
         this.userSessions.delete(userId);
         this.bot.sendMessage(chatId, "❌ 已取消转账");
       }
@@ -659,6 +776,12 @@ ${label} 请输入中奖人数：
     this.bot.on("message", async (msg) => {
       const userId = msg.from.id;
       const session = this.userSessions.get(userId);
+
+      // 保存用户在群组中的输入消息ID，稍后批量删除
+      if (msg.chat.type !== "private" && msg.message_id && session) {
+        session.userMessageIds = session.userMessageIds || [];
+        session.userMessageIds.push(msg.message_id);
+      }
 
       if (!session) return;
 
@@ -725,8 +848,9 @@ ${label} 请输入中奖人数：
 
           // 定向红包输入金额
           session.step = "send_packet_amount";
-          this.bot.sendMessage(
+          await this.sendAndDeleteOld(
             msg.chat.id,
+            session,
             `
 💰 请输入红包总金额（单位：SCASH）：
 
@@ -745,8 +869,9 @@ ${label} 请输入中奖人数：
 
           session.data.topN = topN;
           session.step = "send_packet_amount";
-          this.bot.sendMessage(
+          await this.sendAndDeleteOld(
             msg.chat.id,
+            session,
             `
 💰 请输入红包总金额（单位：SCASH）：
 
@@ -766,13 +891,25 @@ ${label} 请输入中奖人数：
           // 定向红包不需要输入份数（固定1份）
           if (session.data.type === RedPacketType.DIRECT) {
             session.step = "send_packet_message";
-            this.bot.sendMessage(
+            await this.sendAndDeleteOld(
               msg.chat.id,
-              "💬 请输入红包留言（可选，直接发送跳过）：",
+              session,
+              "💬 请输入红包留言（可选）：",
+              {
+                reply_markup: {
+                  inline_keyboard: [
+                    [{ text: "跳过", callback_data: "skip_message" }],
+                  ],
+                },
+              },
             );
           } else {
             session.step = "send_packet_count";
-            this.bot.sendMessage(msg.chat.id, "📦 请输入红包份数：");
+            await this.sendAndDeleteOld(
+              msg.chat.id,
+              session,
+              "📦 请输入红包份数：",
+            );
           }
           break;
 
@@ -784,9 +921,17 @@ ${label} 请输入中奖人数：
           }
           session.data.count = count;
           session.step = "send_packet_message";
-          this.bot.sendMessage(
+          await this.sendAndDeleteOld(
             msg.chat.id,
-            "💬 请输入红包留言（可选，直接发送跳过）：",
+            session,
+            "💬 请输入红包留言（可选）：",
+            {
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: "跳过", callback_data: "skip_message" }],
+                ],
+              },
+            },
           );
           break;
 
@@ -864,7 +1009,16 @@ ${label} 请输入中奖人数：
             },
           };
 
-          this.bot.sendMessage(msg.chat.id, confirmMessage, keyboard);
+          await this.sendAndDeleteOld(msg.chat.id, session, confirmMessage, {
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  { text: "✅ 确认发送", callback_data: "confirm_send_packet" },
+                  { text: "❌ 取消", callback_data: "cancel_send_packet" },
+                ],
+              ],
+            },
+          });
           break;
 
         // 普通转账流程
@@ -882,8 +1036,9 @@ ${label} 请输入中奖人数：
             }
             session.data.recipientAddress = address;
             session.step = "transfer_amount";
-            this.bot.sendMessage(
+            await this.sendAndDeleteOld(
               msg.chat.id,
+              session,
               `
 📤 转账到: \`${address}\`
 
@@ -920,21 +1075,20 @@ ${label} 请输入中奖人数：
 ⚠️ 警告：转账后无法撤销，请仔细核对地址！
           `;
 
-          const transferKeyboard = {
-            reply_markup: {
-              inline_keyboard: [
-                [
-                  { text: "✅ 确认转账", callback_data: "confirm_transfer" },
-                  { text: "❌ 取消", callback_data: "cancel_transfer" },
-                ],
-              ],
-            },
-          };
-
-          this.bot.sendMessage(
+          await this.sendAndDeleteOld(
             msg.chat.id,
+            session,
             transferConfirmMsg,
-            transferKeyboard,
+            {
+              reply_markup: {
+                inline_keyboard: [
+                  [
+                    { text: "✅ 确认转账", callback_data: "confirm_transfer" },
+                    { text: "❌ 取消", callback_data: "cancel_transfer" },
+                  ],
+                ],
+              },
+            },
           );
           break;
       }
@@ -960,7 +1114,11 @@ ${label} 请输入中奖人数：
     return user;
   }
 
-  private async sendRedPacketToGroup(redPacket: any, chatId: string) {
+  private async sendRedPacketToGroup(
+    redPacket: any,
+    chatId: string,
+    txid?: string,
+  ) {
     const typeLabels = {
       [RedPacketType.DIRECT]: "🎯 定向红包",
       [RedPacketType.GROUP_EQUAL]: "⚖️ 均分红包",
@@ -969,30 +1127,49 @@ ${label} 请输入中奖人数：
       [RedPacketType.ACTIVITY_LOTTERY]: "🎰 抽奖红包",
     };
 
-    const message = `
+    let message: string;
+    let options: TelegramBot.SendMessageOptions = {};
+
+    if (redPacket.type === RedPacketType.DIRECT) {
+      const targetUsers = redPacket.targetUsers
+        ? JSON.parse(redPacket.targetUsers)
+        : [];
+      message = `
+🎯 定向红包
+
+💰 金额: ${redPacket.totalAmount} SCASH
+👤 接收: @${targetUsers[0] || "未知"}
+💬 ${redPacket.message}
+${txid ? `\n🔗 交易: \`${txid}\`` : ""}
+      `;
+    } else {
+      message = `
 🧧 ${typeLabels[redPacket.type] || "红包"}
 
 💰 总金额: ${redPacket.totalAmount} SCASH
 📦 份数: ${redPacket.count}
 💬 ${redPacket.message}
+${txid ? `\n🔗 交易: \`${txid}\`` : ""}
 
 ⬇️ 点击下方按钮抢红包！
-    `;
+      `;
 
-    const keyboard = {
-      reply_markup: {
-        inline_keyboard: [
-          [
-            {
-              text: "🎁 抢红包",
-              callback_data: `claim_packet:${redPacket.id}`,
-            },
+      options = {
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: "🎁 抢红包",
+                callback_data: `claim_packet:${redPacket.id}`,
+              },
+            ],
           ],
-        ],
-      },
-    };
+        },
+      };
+    }
 
-    await this.bot.sendMessage(chatId, message, keyboard);
+    await this.bot.sendMessage(chatId, message, options);
   }
 
   private async updateRedPacketMessage(
@@ -1026,6 +1203,31 @@ ${label} 请输入中奖人数：
       });
     } catch (error) {
       // 忽略编辑失败
+    }
+  }
+
+  private async sendAndDeleteOld(
+    chatId: number | string,
+    session: SessionData,
+    message: string,
+    options?: TelegramBot.SendMessageOptions,
+  ): Promise<number> {
+    if (session.lastMessageId && chatId.toString().startsWith("-")) {
+      try {
+        await this.bot.deleteMessage(chatId, session.lastMessageId);
+      } catch (e) {}
+    }
+    const msg = await this.bot.sendMessage(chatId, message, options);
+    session.lastMessageId = msg.message_id;
+    return msg.message_id;
+  }
+
+  private async deleteUserMessages(chatId: string, session: SessionData) {
+    if (!session.userMessageIds || !chatId.startsWith("-")) return;
+    for (const msgId of session.userMessageIds) {
+      try {
+        await this.bot.deleteMessage(chatId, msgId);
+      } catch (e) {}
     }
   }
 
