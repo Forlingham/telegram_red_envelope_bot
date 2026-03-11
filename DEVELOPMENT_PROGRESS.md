@@ -117,6 +117,7 @@ pooling_transfers      - 统筹账户转账记录
 user_activities       - 用户活跃度记录
 block_sync            - 区块同步状态
 system_configs         - 系统配置
+mempool_transactions  - 内存池交易（通过 ZMQ 实时同步）
 ```
 
 ### 关键字段
@@ -129,6 +130,7 @@ system_configs         - 系统配置
 - `block_height` - 所在区块高度（用于计算确认数）
 - `is_spent` - 是否已花费
 - `is_unconfirmed` - 是否未确认（内存池）
+- `is_coinbase` - 是否是 coinbase（挖矿获得），coinbase 需要 100 确认才能使用
 
 **RedPacket 表**
 
@@ -169,6 +171,20 @@ system_configs         - 系统配置
 - 用户抢红包后，创建转账记录
 - 批量处理转账，节省手续费
 - 用户绑定钱包后自动触发转账
+- 发红包时预留手续费储备（每人 0.0023 SCASH）
+
+### 5.5 UTXO 成熟机制
+
+- coinbase（挖矿获得）：需要 100 个确认才能使用
+- 普通转账 UTXO：只需要 1 个确认即可使用
+- 内存池 UTXO：可直接使用（blockHeight = 0）
+- 通过 `is_coinbase` 字段标记
+
+### 5.6 ZMQ 实时同步
+
+- 监听新区块通知，触发 UTXO 同步
+- 监听新交易，存储到 mempool_transactions 表
+- 支持内存池 UTXO 实时查询
 
 ---
 
@@ -176,10 +192,8 @@ system_configs         - 系统配置
 
 ### 高优先级
 
-1. [ ] 活跃红包创建时选择用户逻辑完善
-2. [ ] 抽奖红包抽取逻辑
-3. [ ] 用户绑定钱包后的自动转账触发机制
-4. [ ] 红包过期自动退款
+1. [ ] 抽奖红包抽取逻辑
+2. [ ] 红包过期自动退款
 
 ### 中优先级
 
@@ -193,6 +207,41 @@ system_configs         - 系统配置
 1. [ ] Web 管理后台
 2. [ ] 数据统计和报表
 3. [ ] 更多红包策略（拼图、口令）
+
+---
+
+## 七、环境变量配置
+
+```
+# 数据库
+DATABASE_URL=postgresql://user:pass@localhost:5432/db
+
+# Scash 节点 RPC
+SCASH_RPC_URL=http://localhost:18443
+SCASH_RPC_USER=xxx
+SCASH_RPC_PASS=xxx
+
+# ZMQ 配置
+ZMQ_BLOCK_URL=tcp://127.0.0.1:28444
+ZMQ_TX_URL=tcp://127.0.0.1:28445
+
+# Telegram Bot
+TELEGRAM_BOT_TOKEN=xxx
+
+# 统筹账户配置
+POOLING_ACCOUNT_ADDRESS=bcrt1q...
+POOLING_ACCOUNT_MNEMONIC="24 words..."
+```
+
+---
+
+## 八、手动命令
+
+- `/process` - 手动触发统筹账户转账（管理员）
+
+---
+
+最后更新: 2026-03-11
 
 ---
 
