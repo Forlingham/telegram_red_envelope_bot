@@ -1,0 +1,229 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// 用户表
+model User {
+  id                Int               @id @default(autoincrement())
+  telegramId        String            @unique @map("telegram_id")
+  username          String?           @map("username")
+  firstName         String?           @map("first_name")
+  lastName          String?           @map("last_name")
+  isWatchOnly       Boolean           @default(true) @map("is_watch_only")
+  createdAt         DateTime          @default(now()) @map("created_at")
+  updatedAt         DateTime          @updatedAt @map("updated_at")
+  
+  wallet            Wallet?
+  redPacketsSent    RedPacket[]       @relation("SentRedPackets")
+  claims            RedPacketClaim[]
+  poolingTransfers  PoolingTransfer[]
+  activityRecords   UserActivity[]
+  
+  @@map("users")
+}
+
+// 钱包表
+model Wallet {
+  id                Int               @id @default(autoincrement())
+  userId            Int               @unique @map("user_id")
+  address           String            @unique
+  encryptedMnemonic String?           @map("encrypted_mnemonic")
+  derivationPath    String?           @map("derivation_path")
+  publicKey         String?           @map("public_key")
+  createdAt         DateTime          @default(now()) @map("created_at")
+  
+  user              User              @relation(fields: [userId], references: [id])
+  utxos             Utxo[]
+  
+  @@map("wallets")
+}
+
+// UTXO 索引表 - 全链索引
+model Utxo {
+  id                Int               @id @default(autoincrement())
+  txid              String
+  vout              Int
+  address           String
+  scriptPubKey      String            @map("script_pubkey")
+  amount            Decimal           @db.Decimal(16, 8)
+  blockHeight       Int               @map("block_height") // 所在区块高度，用于计算确认数
+  isSpent           Boolean           @default(false) @map("is_spent")
+  spentByTxid       String?           @map("spent_by_txid")
+  isUnconfirmed     Boolean           @default(false) @map("is_unconfirmed") // 内存池中的交易
+  isCoinbase       Boolean           @default(false) @map("is_coinbase") // 是否是 coinbase（挖矿获得）
+  walletId          Int?              @map("wallet_id")
+  
+  createdAt         DateTime          @default(now()) @map("created_at")
+  updatedAt         DateTime          @updatedAt @map("updated_at")
+  
+  wallet            Wallet?           @relation(fields: [walletId], references: [id])
+  
+  @@unique([txid, vout])
+  @@index([address])
+  @@index([walletId])
+  @@index([isSpent, blockHeight])
+  @@map("utxos")
+}
+
+// 红包表
+model RedPacket {
+  id                Int               @id @default(autoincrement())
+  senderId          Int               @map("sender_id")
+  type              RedPacketType
+  totalAmount       Decimal           @map("total_amount") @db.Decimal(16, 8)
+  remainingAmount   Decimal           @map("remaining_amount") @db.Decimal(16, 8)
+  count             Int
+  remainingCount    Int               @map("remaining_count")
+  message           String?
+  chatId            String            @map("chat_id")
+  chatTitle         String?           @map("chat_title")
+  status            RedPacketStatus   @default(ACTIVE)
+  strategy          RedPacketStrategy @default(EQUAL)
+  targetUsers       String?           @map("target_users")
+  topN              Int?              @map("top_n")
+  fundingTxid       String?           @map("funding_txid")
+  rawTransaction    String?           @map("raw_transaction")
+  
+  createdAt         DateTime          @default(now()) @map("created_at")
+  expiredAt         DateTime          @map("expired_at")
+  
+  sender            User              @relation("SentRedPackets", fields: [senderId], references: [id])
+  claims            RedPacketClaim[]
+  
+  @@index([status, expiredAt])
+  @@index([chatId, createdAt])
+  @@map("red_packets")
+}
+
+enum RedPacketType {
+  DIRECT
+  GROUP_EQUAL
+  GROUP_RANDOM
+  ACTIVITY_TOP
+  ACTIVITY_LOTTERY
+}
+
+enum RedPacketStrategy {
+  EQUAL
+  RANDOM
+}
+
+enum RedPacketStatus {
+  ACTIVE
+  COMPLETED
+  EXPIRED
+  REFUNDED
+}
+
+// 红包领取记录
+model RedPacketClaim {
+  id                Int               @id @default(autoincrement())
+  redPacketId       Int               @map("red_packet_id")
+  userId            Int               @map("user_id")
+  amount            Decimal           @db.Decimal(16, 8)
+  claimedAt         DateTime          @default(now()) @map("claimed_at")
+  txid              String?
+  status            ClaimStatus       @default(PENDING)
+  
+  redPacket         RedPacket         @relation(fields: [redPacketId], references: [id])
+  user              User              @relation(fields: [userId], references: [id])
+  
+  @@unique([redPacketId, userId])
+  @@index([userId, status])
+  @@map("red_packet_claims")
+}
+
+enum ClaimStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+// 统筹账户转账记录
+model PoolingTransfer {
+  id                Int               @id @default(autoincrement())
+  userId            Int               @map("user_id")
+  type              TransferType
+  amount            Decimal           @db.Decimal(16, 8)
+  claimId           Int?              @map("claim_id")
+  txid              String?
+  status            TransferStatus    @default(PENDING)
+  errorMessage      String?           @map("error_message")
+  retryCount        Int               @default(0) @map("retry_count")
+  createdAt         DateTime          @default(now()) @map("created_at")
+  processedAt       DateTime?         @map("processed_at")
+  
+  user              User              @relation(fields: [userId], references: [id])
+  
+  @@index([status, retryCount])
+  @@index([userId, status])
+  @@map("pooling_transfers")
+}
+
+enum TransferType {
+  REDPACKET_CLAIM
+  REFUND
+}
+
+enum TransferStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  RETRYING
+}
+
+// 用户活跃度记录
+model UserActivity {
+  id                Int               @id @default(autoincrement())
+  userId            Int               @map("user_id")
+  chatId            String            @map("chat_id")
+  messageCount      Int               @default(0) @map("message_count")
+  lastMessageAt     DateTime?         @map("last_message_at")
+  recordedDate      DateTime          @default(now()) @map("recorded_date")
+  
+  user              User              @relation(fields: [userId], references: [id])
+  
+  @@unique([userId, chatId, recordedDate])
+  @@index([chatId, recordedDate])
+  @@map("user_activities")
+}
+
+// 区块同步状态
+model BlockSync {
+  id                Int               @id @default(autoincrement())
+  lastBlockHeight   Int               @map("last_block_height")
+  lastBlockHash     String            @map("last_block_hash")
+  updatedAt         DateTime          @updatedAt @map("updated_at")
+  
+  @@map("block_sync")
+}
+
+// 系统配置
+model SystemConfig {
+  id                Int               @id @default(autoincrement())
+  key               String            @unique
+  value             String
+  updatedAt         DateTime          @updatedAt @map("updated_at")
+  
+  @@map("system_configs")
+}
+
+// 内存池交易（通过 ZMQ 实时同步）
+model MempoolTransaction {
+  id                Int               @id @default(autoincrement())
+  txid              String            @unique
+  hex               String            @db.Text
+  fee               Decimal           @db.Decimal(16, 8) @map("fee")
+  size              Int
+  time              DateTime
+  receivedAt        DateTime          @default(now()) @map("received_at")
+  
+  @@index([receivedAt])
+  @@map("mempool_transactions")
+}

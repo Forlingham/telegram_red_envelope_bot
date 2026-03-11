@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+.env.local
+.env.production
+*.log
+.DS_Store
+coverage/
+.vscode/
+*.sqlite
+*.sqlite3
+prisma/migrations/
