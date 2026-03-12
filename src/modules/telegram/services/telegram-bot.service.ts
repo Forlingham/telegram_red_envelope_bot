@@ -517,24 +517,50 @@ export class TelegramBotService implements OnModuleInit {
 示例: @username
               `,
             );
-          } else if (
-            type === RedPacketType.ACTIVITY_TOP ||
-            type === RedPacketType.ACTIVITY_LOTTERY
-          ) {
-            // 活跃红包和抽奖红包需要输入中奖人数
+          } else if (type === RedPacketType.ACTIVITY_TOP) {
+            // 活跃红包需要输入中奖人数
             session.step = "send_packet_topn";
-            const label =
-              type === RedPacketType.ACTIVITY_TOP
-                ? "🔥 活跃红包"
-                : "🎰 抽奖红包";
             await this.sendAndDeleteOld(
               chatId,
               session,
               `
-${label} 请输入中奖人数：
+🔥 活跃红包 请输入中奖人数：
 
 示例: 3
               `,
+            );
+          } else if (type === RedPacketType.ACTIVITY_LOTTERY) {
+            // 抽奖红包先选择范围
+            session.step = "send_packet_lottery_scope";
+            const keyboard = {
+              reply_markup: {
+                inline_keyboard: [
+                  [
+                    {
+                      text: "📢 全群抽奖",
+                      callback_data: "lottery_scope:ALL",
+                    },
+                  ],
+                  [
+                    {
+                      text: "🏆 活跃度前50",
+                      callback_data: "lottery_scope:TOP50",
+                    },
+                  ],
+                  [
+                    {
+                      text: "🥇 活跃度前100",
+                      callback_data: "lottery_scope:TOP100",
+                    },
+                  ],
+                ],
+              },
+            };
+            await this.sendAndDeleteOld(
+              chatId,
+              session,
+              "🎰 抽奖红包 请选择抽奖范围：",
+              keyboard,
             );
           } else {
             // 群红包直接问金额
@@ -634,6 +660,7 @@ ${label} 请输入中奖人数：
             strategy: session.data.strategy,
             targetUsers: session.data.targetUsers,
             topN: session.data.topN,
+            lotteryScope: session.data.lotteryScope,
           });
 
           if (result.success) {
@@ -664,6 +691,43 @@ ${label} 请输入中奖人数：
           } else {
             this.bot.sendMessage(chatId, `❌ 创建失败: ${result.message}`);
           }
+        }
+      }
+
+      // 处理抽奖红包范围选择
+      if (data.startsWith("lottery_scope:")) {
+        const scope = data.split(":")[1];
+        const session = this.userSessions.get(userId);
+
+        if (session && session.step === "send_packet_lottery_scope") {
+          // 删除选择消息
+          if (query.message) {
+            try {
+              await this.bot.deleteMessage(chatId, query.message.message_id);
+            } catch (e) {}
+          }
+
+          // 设置范围和最大人数
+          const scopeMap: Record<string, { label: string; maxN: number }> = {
+            ALL: { label: "全群", maxN: 100 },
+            TOP50: { label: "活跃度前50", maxN: 49 },
+            TOP100: { label: "活跃度前100", maxN: 99 },
+          };
+
+          session.data.lotteryScope = scope;
+          session.data.lotteryScopeLabel = scopeMap[scope].label;
+          session.data.lotteryMaxN = scopeMap[scope].maxN;
+          session.step = "send_packet_topn";
+
+          await this.sendAndDeleteOld(
+            chatId,
+            session,
+            `
+🎰 抽奖红包（${scopeMap[scope].label}）
+
+请输入中奖人数（1-${scopeMap[scope].maxN}）：
+            `,
+          );
         }
       }
 
@@ -754,13 +818,20 @@ ${label} 请输入中奖人数：
             confirmMessage += `\n目标用户: @${session.data.targetUsers.join(", @")}`;
           }
 
-          // 活跃红包/抽奖红包显示中奖人数
+          // 活跃红包/抽奖红包显示中奖人数和范围
           if (
             session.data.type === RedPacketType.ACTIVITY_TOP ||
             session.data.type === RedPacketType.ACTIVITY_LOTTERY
           ) {
             if (session.data.topN) {
               confirmMessage += `\n中奖人数: ${session.data.topN}`;
+            }
+            // 抽奖红包显示范围
+            if (
+              session.data.type === RedPacketType.ACTIVITY_LOTTERY &&
+              session.data.lotteryScopeLabel
+            ) {
+              confirmMessage += `\n抽奖范围: ${session.data.lotteryScopeLabel}`;
             }
           } else if (session.data.type !== RedPacketType.DIRECT) {
             // 普通群红包显示份数
@@ -772,10 +843,12 @@ ${label} 请输入中奖人数：
             session.data.type === RedPacketType.ACTIVITY_TOP ||
             session.data.type === RedPacketType.ACTIVITY_LOTTERY
           ) {
-            const strategyLabel =
-              session.data.strategy === RedPacketStrategy.EQUAL
-                ? "⚖️ 均分"
-                : "🔥 按活跃度排序";
+            let strategyLabel = "⚖️ 均分";
+            if (session.data.strategy === RedPacketStrategy.RANDOM) {
+              strategyLabel = "🎲 随机分配";
+            } else if (session.data.strategy === RedPacketStrategy.RANK) {
+              strategyLabel = "🔥 按活跃度排序";
+            }
             confirmMessage += `\n分配方式: ${strategyLabel}`;
           }
 
@@ -991,12 +1064,28 @@ ${label} 请输入中奖人数：
           );
           break;
 
-        // 活跃红包 - 输入中奖人数
+        // 活跃红包/抽奖红包 - 输入中奖人数
         case "send_packet_topn":
           const topN = parseInt(text);
-          if (isNaN(topN) || topN <= 0 || topN > 100) {
-            this.bot.sendMessage(msg.chat.id, "❌ 请输入 1-100 之间的有效数字");
-            return;
+
+          // 如果是抽奖红包，验证范围
+          if (session.data.lotteryScope) {
+            const maxN = session.data.lotteryMaxN || 100;
+            if (isNaN(topN) || topN <= 0 || topN > maxN) {
+              this.bot.sendMessage(
+                msg.chat.id,
+                `❌ 请输入 1-${maxN} 之间的有效数字`,
+              );
+              return;
+            }
+          } else {
+            if (isNaN(topN) || topN <= 0 || topN > 100) {
+              this.bot.sendMessage(
+                msg.chat.id,
+                "❌ 请输入 1-100 之间的有效数字",
+              );
+              return;
+            }
           }
 
           session.data.topN = topN;
@@ -1035,11 +1124,8 @@ ${label} 请输入中奖人数：
                 },
               },
             );
-          } else if (
-            session.data.type === RedPacketType.ACTIVITY_TOP ||
-            session.data.type === RedPacketType.ACTIVITY_LOTTERY
-          ) {
-            // 活跃红包/抽奖红包：选择分配方式
+          } else if (session.data.type === RedPacketType.ACTIVITY_TOP) {
+            // 活跃红包：选择分配方式
             session.step = "send_packet_strategy";
             const keyboard = {
               reply_markup: {
@@ -1065,6 +1151,66 @@ ${label} 请输入中奖人数：
               "💡 请选择分配方式：",
               keyboard,
             );
+          } else if (session.data.type === RedPacketType.ACTIVITY_LOTTERY) {
+            // 抽奖红包：根据人数和范围决定
+            if (session.data.topN && session.data.topN > 1) {
+              // 多人：选择分配方式
+              session.step = "send_packet_strategy";
+
+              // 全群抽奖不能选按活跃度排序（因为是随机抽取，不是按活跃度）
+              const isAllScope = session.data.lotteryScope === "ALL";
+
+              const keyboard = {
+                reply_markup: {
+                  inline_keyboard: [
+                    [
+                      {
+                        text: "⚖️ 均分",
+                        callback_data: "strategy:EQUAL",
+                      },
+                    ],
+                    [
+                      {
+                        text: "🎲 随机分配",
+                        callback_data: "strategy:RANDOM",
+                      },
+                    ],
+                    ...(isAllScope
+                      ? []
+                      : [
+                          [
+                            {
+                              text: "🔥 按活跃度排序",
+                              callback_data: "strategy:RANK",
+                            },
+                          ],
+                        ]),
+                  ],
+                },
+              };
+              await this.sendAndDeleteOld(
+                msg.chat.id,
+                session,
+                "💡 请选择分配方式：",
+                keyboard,
+              );
+            } else {
+              // 只有1人，直接设置默认分配方式
+              session.data.strategy = RedPacketStrategy.EQUAL;
+              session.step = "send_packet_message";
+              await this.sendAndDeleteOld(
+                msg.chat.id,
+                session,
+                "💬 请输入红包留言（可选）：",
+                {
+                  reply_markup: {
+                    inline_keyboard: [
+                      [{ text: "跳过", callback_data: "skip_message" }],
+                    ],
+                  },
+                },
+              );
+            }
           } else {
             session.step = "send_packet_count";
             await this.sendAndDeleteOld(
@@ -1100,6 +1246,14 @@ ${label} 请输入中奖人数：
         case "send_packet_message":
           session.data.message = text || "恭喜发财，大吉大利！";
 
+          // 活跃红包/抽奖红包设置 count = topN
+          if (
+            session.data.type === RedPacketType.ACTIVITY_TOP ||
+            session.data.type === RedPacketType.ACTIVITY_LOTTERY
+          ) {
+            session.data.count = session.data.topN;
+          }
+
           // 根据类型处理不同逻辑
           if (
             session.data.type === RedPacketType.GROUP_EQUAL ||
@@ -1130,13 +1284,20 @@ ${label} 请输入中奖人数：
             confirmMessage += `\n目标用户: @${session.data.targetUsers.join(", @")}`;
           }
 
-          // 活跃红包/抽奖红包显示中奖人数
+          // 活跃红包/抽奖红包显示中奖人数和范围
           if (
             session.data.type === RedPacketType.ACTIVITY_TOP ||
             session.data.type === RedPacketType.ACTIVITY_LOTTERY
           ) {
             if (session.data.topN) {
               confirmMessage += `\n中奖人数: ${session.data.topN}`;
+            }
+            // 抽奖红包显示范围
+            if (
+              session.data.type === RedPacketType.ACTIVITY_LOTTERY &&
+              session.data.lotteryScopeLabel
+            ) {
+              confirmMessage += `\n抽奖范围: ${session.data.lotteryScopeLabel}`;
             }
           } else if (session.data.type === RedPacketType.DIRECT) {
             // 定向红包不需要显示份数
@@ -1150,10 +1311,12 @@ ${label} 请输入中奖人数：
             session.data.type === RedPacketType.ACTIVITY_TOP ||
             session.data.type === RedPacketType.ACTIVITY_LOTTERY
           ) {
-            const strategyLabel =
-              session.data.strategy === RedPacketStrategy.EQUAL
-                ? "⚖️ 均分"
-                : "🔥 按活跃度排序";
+            let strategyLabel = "⚖️ 均分";
+            if (session.data.strategy === RedPacketStrategy.RANDOM) {
+              strategyLabel = "🎲 随机分配";
+            } else if (session.data.strategy === RedPacketStrategy.RANK) {
+              strategyLabel = "🔥 按活跃度排序";
+            }
             confirmMessage += `\n分配方式: ${strategyLabel}`;
           }
 
@@ -1326,9 +1489,12 @@ ${label} 请输入中奖人数：
       if (recipients && recipients.length > 0) {
         recipientsText = "\n🎉 获得者：\n";
         recipients.forEach((r, index) => {
-          const name = r.username || r.telegramId;
-          const displayName = r.username ? `@${r.username}` : name;
-          recipientsText += `${index + 1}. ${displayName}: ${r.amount} SCASH\n`;
+          const displayName = r.username
+            ? `@${r.username}`
+            : (r as any).firstName || `用户${r.telegramId.slice(-4)}`;
+          const statusText =
+            (r as any).status === "待绑定" ? " (待绑定地址)" : "";
+          recipientsText += `${index + 1}. ${displayName}: ${r.amount} SCASH${statusText}\n`;
         });
       }
 

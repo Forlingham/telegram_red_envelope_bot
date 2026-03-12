@@ -25,7 +25,8 @@ interface CreateRedPacketInput {
   chatTitle?: string;
   strategy?: RedPacketStrategy;
   targetUsers?: string[]; // 定向红包时使用
-  topN?: number; // 活跃红包时使用
+  topN?: number; // 活跃红包/抽奖红包时使用
+  lotteryScope?: string; // 抽奖红包范围：ALL/TOP50/TOP100
 }
 
 interface ClaimRedPacketInput {
@@ -111,10 +112,11 @@ export class RedpacketService {
       // 根据红包类型选择处理方式
       const isDirectTransfer =
         input.type === RedPacketType.DIRECT ||
-        input.type === RedPacketType.ACTIVITY_TOP;
+        input.type === RedPacketType.ACTIVITY_TOP ||
+        input.type === RedPacketType.ACTIVITY_LOTTERY;
 
       if (isDirectTransfer) {
-        // 定向红包和活跃红包：直接转账给目标用户
+        // 定向红包、活跃红包、抽奖红包：直接转账给目标用户
         return this.createDirectTransferRedPacket(
           input,
           senderWallet,
@@ -162,13 +164,31 @@ export class RedpacketService {
     if (input.type === RedPacketType.DIRECT && input.targetUsers) {
       targetTelegramIds = input.targetUsers;
     } else if (input.type === RedPacketType.ACTIVITY_TOP && input.topN) {
-      // 获取活跃用户列表
+      // 获取活跃用户列表（排除发送者）
       const activeUsers = await this.getTopActiveUsers(
         input.chatId,
         input.topN,
+        input.senderId,
       );
       targetTelegramIds = activeUsers.map((u) => u.telegramId);
       activityMap = activeUsers.reduce(
+        (map, u) => {
+          map[u.telegramId] = u.messageCount;
+          return map;
+        },
+        {} as Record<string, number>,
+      );
+    } else if (input.type === RedPacketType.ACTIVITY_LOTTERY && input.topN) {
+      // 抽奖红包：根据范围获取用户
+      const scope = (input.lotteryScope as "ALL" | "TOP50" | "TOP100") || "ALL";
+      const users = await this.getTopActiveUsers(
+        input.chatId,
+        input.topN,
+        input.senderId,
+        scope,
+      );
+      targetTelegramIds = users.map((u) => u.telegramId);
+      activityMap = users.reduce(
         (map, u) => {
           map[u.telegramId] = u.messageCount;
           return map;
@@ -182,16 +202,17 @@ export class RedpacketService {
     }
 
     // 获取目标用户的钱包地址
-    const recipients = await this.getTargetUserAddresses(
-      targetTelegramIds,
-      totalAmount,
-      input.count,
-      input.strategy,
-      activityMap,
-    );
+    const { recipients, usersWithoutAddress, userAmounts } =
+      await this.getTargetUserAddresses(
+        targetTelegramIds,
+        totalAmount,
+        input.count,
+        input.strategy,
+        activityMap,
+      );
 
-    if (recipients.length === 0) {
-      return { success: false, message: "目标用户没有绑定钱包地址" };
+    if (recipients.length === 0 && usersWithoutAddress.length === 0) {
+      return { success: false, message: "没有找到目标用户" };
     }
 
     // 计算需要转账的总金额（只转给有地址的用户）
@@ -200,13 +221,36 @@ export class RedpacketService {
       new Big(0),
     );
 
+    // 获取统筹账户地址
+    const poolingAddress = await this.getPoolingAccountAddress();
+
+    // 如果有没绑定地址的用户，需要把他们的金额转到统筹账户
+    let poolingAmount = new Big(0);
+    if (usersWithoutAddress.length > 0 && poolingAddress) {
+      // 没地址用户的金额总和
+      poolingAmount = usersWithoutAddress.reduce((sum, telegramId) => {
+        const amount = userAmounts.get(telegramId) || new Big(0);
+        return sum.plus(amount);
+      }, new Big(0));
+    }
+
     // 估算手续费
     const estimatedFee = this.txBuilder.estimateFee(
       1,
-      recipients.length,
+      recipients.length + (poolingAmount.gt(0) ? 1 : 0), // 如果转统筹账户需要额外的输出
       DEFAULT_CONFIG.FEE_RATE,
     );
-    const requiredBalance = transferAmount.plus(estimatedFee);
+
+    // 统筹账户手续费储备
+    const feeReserve =
+      usersWithoutAddress.length > 0
+        ? new Big(usersWithoutAddress.length).mul(0.0023)
+        : new Big(0);
+
+    const requiredBalance = transferAmount
+      .plus(poolingAmount)
+      .plus(estimatedFee)
+      .plus(feeReserve);
 
     if (balance.lt(requiredBalance)) {
       return {
@@ -215,10 +259,21 @@ export class RedpacketService {
       };
     }
 
+    // 构建交易输出列表
+    let txOutputs: { address: string; amount: Big }[] = [...recipients];
+
+    // 如果有没绑定地址的用户，需要把他们的金额转到统筹账户
+    if (poolingAmount.gt(0) && poolingAddress) {
+      txOutputs.push({
+        address: poolingAddress,
+        amount: poolingAmount.plus(feeReserve),
+      });
+    }
+
     // 构建并广播交易
     const buildResult = await this.txBuilder.buildTransaction(
       input.senderId,
-      recipients,
+      txOutputs,
       DEFAULT_CONFIG.FEE_RATE,
     );
 
@@ -238,26 +293,26 @@ export class RedpacketService {
       };
     }
 
-    // 为没有地址的用户创建待处理记录
-    const usersWithAddress = new Set(recipients.map((r) => r.telegramId));
-    const usersWithoutAddress = targetTelegramIds.filter(
-      (id) => !usersWithAddress.has(id),
-    );
-
     // 创建红包记录
     const expiredAt = new Date();
     expiredAt.setHours(
       expiredAt.getHours() + DEFAULT_CONFIG.REDPACKET_EXPIRY_HOURS,
     );
 
+    // 如果有用户没绑定钱包，状态保持 ACTIVE；否则 COMPLETED
+    const hasPendingUsers = usersWithoutAddress.length > 0;
+    const remainingAmount = hasPendingUsers
+      ? poolingAmount.plus(feeReserve).toFixed(8)
+      : "0";
+
     const redPacket = await this.prisma.redPacket.create({
       data: {
         senderId: input.senderId,
         type: input.type,
         totalAmount: totalAmount.toFixed(8),
-        remainingAmount: "0", // 直接转账类型的红包，创建时就已全部分配
+        remainingAmount,
         count: input.count,
-        remainingCount: 0,
+        remainingCount: hasPendingUsers ? usersWithoutAddress.length : 0,
         message: input.message || "",
         chatId: input.chatId,
         chatTitle: input.chatTitle,
@@ -268,7 +323,9 @@ export class RedpacketService {
         topN: input.topN,
         fundingTxid: broadcastResult.txid,
         rawTransaction: buildResult.rawTransaction,
-        status: RedPacketStatus.COMPLETED, // 直接转账类型直接标记为完成
+        status: hasPendingUsers
+          ? RedPacketStatus.ACTIVE
+          : RedPacketStatus.COMPLETED,
         expiredAt,
       },
     });
@@ -299,17 +356,25 @@ export class RedpacketService {
       });
 
       if (user) {
-        // 计算该用户应得的金额
-        const userAmount =
-          input.strategy === RedPacketStrategy.EQUAL
-            ? totalAmount.div(input.count)
-            : totalAmount.div(targetTelegramIds.length); // 简化处理，平均分配
+        // 使用 userAmounts 获取该用户应得的金额
+        const userAmount = userAmounts.get(telegramId)?.toFixed(8) || "0";
 
+        // 创建红包领取记录（等待中）
+        await this.prisma.redPacketClaim.create({
+          data: {
+            redPacketId: redPacket.id,
+            userId: user.id,
+            amount: userAmount,
+            status: TransferStatus.PENDING,
+          },
+        });
+
+        // 创建统筹转账记录
         await this.prisma.poolingTransfer.create({
           data: {
             userId: user.id,
             type: "REDPACKET_CLAIM",
-            amount: userAmount.toFixed(8),
+            amount: userAmount,
             status: TransferStatus.PENDING,
             errorMessage: "用户未绑定钱包地址，等待绑定后转账",
           },
@@ -317,28 +382,42 @@ export class RedpacketService {
       }
     }
 
-    // 获取 recipients 的用户信息
-    const recipientUserIds = await Promise.all(
-      recipients.map(async (r) => {
-        const user = await this.prisma.user.findFirst({
-          where: {
-            OR: [{ telegramId: r.telegramId }, { username: r.telegramId }],
-          },
+    // 获取所有目标用户的信息（用于显示）
+    const allRecipientUsers = await Promise.all(
+      targetTelegramIds.map(async (telegramId) => {
+        // 通过 telegramId 查找用户
+        const user = await this.prisma.user.findUnique({
+          where: { telegramId },
         });
-        return user;
+        return {
+          telegramId,
+          username: user?.username || null,
+          firstName: user?.firstName || null,
+        };
       }),
     );
+
+    // 构建返回的所有用户列表（包括有地址的和没地址的）
+    const allRecipientsDisplay = allRecipientUsers.map((ru) => {
+      const hasAddress = recipients.some((r) => r.telegramId === ru.telegramId);
+      // 使用 userAmounts 获取每个用户的金额
+      const amount = userAmounts.get(ru.telegramId)?.toFixed(8) || "0";
+
+      return {
+        telegramId: ru.telegramId,
+        username: ru.username,
+        firstName: ru.firstName,
+        amount,
+        status: hasAddress ? "已转账" : "待绑定",
+      };
+    });
 
     return {
       success: true,
       redPacket,
       txid: broadcastResult.txid,
       message: `红包创建成功，已转账给 ${recipients.length} 位用户，${usersWithoutAddress.length} 位用户等待绑定地址`,
-      recipients: recipients.map((r, index) => ({
-        telegramId: r.telegramId,
-        username: recipientUserIds[index]?.username || null,
-        amount: r.amount.toFixed(8),
-      })),
+      recipients: allRecipientsDisplay,
     };
   }
 
@@ -454,6 +533,7 @@ export class RedpacketService {
 
   /**
    * 获取目标用户的钱包地址和分配金额
+   * 返回：有地址的用户、没地址的用户列表、每个用户应得的金额
    */
   private async getTargetUserAddresses(
     telegramIds: string[],
@@ -461,18 +541,24 @@ export class RedpacketService {
     count: number,
     strategy?: RedPacketStrategy,
     activityMap?: Record<string, number>,
-  ): Promise<{ telegramId: string; address: string; amount: Big }[]> {
+  ): Promise<{
+    recipients: { telegramId: string; address: string; amount: Big }[];
+    usersWithoutAddress: string[];
+    userAmounts: Map<string, Big>; // 每个用户应得的金额
+  }> {
     const recipients: { telegramId: string; address: string; amount: Big }[] =
       [];
+    const usersWithoutAddress: string[] = [];
+    const userAmounts = new Map<string, Big>();
 
+    // 先收集所有用户信息
+    const allUsers: { telegramId: string; address?: string }[] = [];
     for (const telegramId of telegramIds) {
-      // 先尝试通过 telegramId（数字ID）查找
       let user = await this.prisma.user.findUnique({
         where: { telegramId },
         include: { wallet: true },
       });
 
-      // 如果没找到，尝试通过 username 查找
       if (!user) {
         user = await this.prisma.user.findFirst({
           where: { username: telegramId },
@@ -484,82 +570,157 @@ export class RedpacketService {
         recipients.push({
           telegramId: user.telegramId,
           address: user.wallet.address,
-          amount: new Big(0), // 稍后计算具体金额
+          amount: new Big(0),
         });
+        allUsers.push({
+          telegramId: user.telegramId,
+          address: user.wallet.address,
+        });
+      } else {
+        usersWithoutAddress.push(telegramId);
+        allUsers.push({ telegramId, address: undefined });
       }
     }
 
-    if (recipients.length === 0) {
-      return [];
+    if (allUsers.length === 0) {
+      return { recipients: [], usersWithoutAddress: [], userAmounts };
     }
 
-    // 计算每人应得的金额
+    // 计算每个用户应得的金额（基于所有用户）
     if (strategy === RedPacketStrategy.EQUAL) {
-      // 均分
-      const equalAmount = totalAmount.div(count);
-      recipients.forEach((r) => (r.amount = equalAmount));
+      // 均分（按总人数）
+      const equalAmount = totalAmount.div(allUsers.length);
+      allUsers.forEach((u) => userAmounts.set(u.telegramId, equalAmount));
     } else if (strategy === RedPacketStrategy.RANK && activityMap) {
       // 按活跃度排序分配
-      const totalActivity = recipients.reduce((sum, r) => {
-        const activity = activityMap[r.telegramId] || 1;
+      const totalActivity = allUsers.reduce((sum, u) => {
+        const activity = activityMap[u.telegramId] || 1;
         return sum + activity;
       }, 0);
 
-      let remainingAmount = totalAmount;
-      const sortedRecipients = [...recipients].sort((a, b) => {
+      const sortedUsers = [...allUsers].sort((a, b) => {
         const activityA = activityMap[a.telegramId] || 0;
         const activityB = activityMap[b.telegramId] || 0;
         return activityB - activityA;
       });
 
-      sortedRecipients.forEach((r, index) => {
-        const activity = activityMap[r.telegramId] || 1;
-        if (index === sortedRecipients.length - 1) {
-          r.amount = remainingAmount;
+      let remainingAmount = totalAmount;
+      sortedUsers.forEach((u, index) => {
+        const activity = activityMap[u.telegramId] || 1;
+        let amount: Big;
+        if (index === sortedUsers.length - 1) {
+          amount = remainingAmount;
         } else {
           const ratio = activity / totalActivity;
-          const amount = totalAmount.mul(ratio);
-          r.amount = amount;
+          amount = totalAmount.mul(ratio);
           remainingAmount = remainingAmount.minus(amount);
         }
+        userAmounts.set(u.telegramId, amount);
       });
+    } else if (strategy === RedPacketStrategy.RANDOM) {
+      // 随机分配（二倍均值法）
+      const amounts = this.calculateRandomAmounts(totalAmount, allUsers.length);
+      allUsers.forEach((u, i) => userAmounts.set(u.telegramId, amounts[i]));
     } else {
       // 默认均分
-      const avgAmount = totalAmount.div(recipients.length);
-      recipients.forEach((r) => (r.amount = avgAmount));
+      const equalAmount = totalAmount.div(allUsers.length);
+      allUsers.forEach((u) => userAmounts.set(u.telegramId, equalAmount));
     }
 
-    return recipients;
+    // 为有地址的用户设置金额
+    recipients.forEach((r) => {
+      r.amount = userAmounts.get(r.telegramId) || new Big(0);
+    });
+
+    return { recipients, usersWithoutAddress, userAmounts };
+  }
+
+  /**
+   * 计算随机金额（二倍均值法）
+   */
+  private calculateRandomAmounts(totalAmount: Big, count: number): Big[] {
+    const amounts: Big[] = [];
+    let remaining = totalAmount;
+    const countBig = new Big(count);
+
+    for (let i = 0; i < count - 1; i++) {
+      const max = remaining.mul(2).div(countBig).toNumber();
+      const amount = Math.floor(Math.random() * max * 100000000) / 100000000;
+      const bigAmount = new Big(amount.toFixed(8));
+      amounts.push(bigAmount);
+      remaining = remaining.minus(bigAmount);
+    }
+    amounts.push(remaining);
+
+    return amounts;
   }
 
   /**
    * 获取活跃用户列表（最近30分钟）
+   * scope = ALL: 获取群里所有有过发言的用户（打乱顺序，随机抽取）
+   * scope = TOP50/TOP100: 按活跃度排序
    */
   private async getTopActiveUsers(
     chatId: string,
     topN: number,
+    excludeUserId?: number,
+    scope: "ALL" | "TOP50" | "TOP100" = "ALL",
   ): Promise<{ userId: number; telegramId: string; messageCount: number }[]> {
     const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000);
 
-    const activities = await this.prisma.$queryRaw`
-      SELECT 
-        u.id as "userId",
-        u.telegram_id as "telegramId",
-        COUNT(uar.id)::int as "messageCount"
-      FROM user_activity_records uar
-      JOIN users u ON u.id = uar.user_id
-      WHERE uar.chat_id = ${chatId}
-        AND uar.created_at > ${thirtyMinutesAgo}
-      GROUP BY u.id, u.telegram_id
-      ORDER BY "messageCount" DESC
-      LIMIT ${topN}
-    `;
+    // 根据范围确定查询数量限制
+    const scopeLimit: Record<string, number> = {
+      ALL: 500, // 全群取足够多用于随机抽取
+      TOP50: 50,
+      TOP100: 100,
+    };
+    const limit = Math.min(scopeLimit[scope] || 500, topN);
 
-    return (activities as any[]).map((a) => ({
+    let activities;
+    if (excludeUserId) {
+      activities = await this.prisma.$queryRaw`
+        SELECT 
+          u.id as "userId",
+          u.telegram_id as "telegramId",
+          COUNT(uar.id)::int as "messageCount"
+        FROM user_activity_records uar
+        JOIN users u ON u.id = uar.user_id
+        WHERE uar.chat_id = ${chatId}
+          AND uar.created_at > ${thirtyMinutesAgo}
+          AND uar.user_id != ${excludeUserId}
+        GROUP BY u.id, u.telegram_id
+        LIMIT ${limit}
+      `;
+    } else {
+      activities = await this.prisma.$queryRaw`
+        SELECT 
+          u.id as "userId",
+          u.telegram_id as "telegramId",
+          COUNT(uar.id)::int as "messageCount"
+        FROM user_activity_records uar
+        JOIN users u ON u.id = uar.user_id
+        WHERE uar.chat_id = ${chatId}
+          AND uar.created_at > ${thirtyMinutesAgo}
+        GROUP BY u.id, u.telegram_id
+        LIMIT ${limit}
+      `;
+    }
+
+    const result = (activities as any[]).map((a) => ({
       userId: a.userId,
       telegramId: a.telegramId,
       messageCount: a.messageCount,
     }));
+
+    // 全群范围：打乱顺序随机抽取
+    if (scope === "ALL") {
+      return result.sort(() => Math.random() - 0.5).slice(0, topN);
+    }
+
+    // TOP50/TOP100：按活跃度排序
+    return result
+      .sort((a, b) => b.messageCount - a.messageCount)
+      .slice(0, topN);
   }
 
   /**
