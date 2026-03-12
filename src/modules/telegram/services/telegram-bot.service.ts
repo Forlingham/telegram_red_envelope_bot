@@ -151,10 +151,30 @@ export class TelegramBotService implements OnModuleInit {
       const wallet = await this.walletService.getWalletByUserId(user.id);
 
       if (!wallet) {
-        this.bot.sendMessage(
-          chatId,
-          "❌ 你还没有绑定钱包\n\n使用 /bind <地址> 绑定只读钱包\n或使用 /create 创建新钱包",
-        );
+        const pendingClaims = await this.prisma.redPacketClaim.findMany({
+          where: {
+            userId: user.id,
+            status: "PENDING",
+          },
+        });
+
+        let pendingAmount = new Big(0);
+        for (const claim of pendingClaims) {
+          pendingAmount = pendingAmount.add(new Big(claim.amount.toString()));
+        }
+
+        let message = "💰 红包待领取\n\n";
+
+        if (pendingClaims.length > 0) {
+          message += `📥 你已抢到但未转账的金额: ${pendingAmount.toFixed(8)} SCASH\n`;
+          message += `\n⚠️ 绑定钱包后将自动转账到你的地址`;
+        } else {
+          message += `📭 你还没有抢到红包`;
+        }
+
+        message += `\n\n💡 绑定钱包后可收发红包\n使用 /bind <地址> 绑定只读钱包\n或使用 /create 创建新钱包`;
+
+        this.bot.sendMessage(chatId, message);
         return;
       }
 
@@ -1439,19 +1459,49 @@ export class TelegramBotService implements OnModuleInit {
   }
 
   private async getOrCreateUser(telegramUser: TelegramBot.User): Promise<any> {
+    // 先尝试通过 telegramId 查找
     let user = await this.prisma.user.findUnique({
       where: { telegramId: telegramUser.id.toString() },
     });
 
     if (!user) {
-      user = await this.prisma.user.create({
-        data: {
-          telegramId: telegramUser.id.toString(),
-          username: telegramUser.username,
-          firstName: telegramUser.first_name,
-          lastName: telegramUser.last_name,
-        },
-      });
+      // 如果没找到，检查是否有该用户的临时记录需要更新
+      // 通过 username 或 firstName 查找临时用户
+      if (telegramUser.username) {
+        // 先尝试通过 username 精确匹配临时用户
+        const tempUser = await this.prisma.user.findFirst({
+          where: {
+            username: telegramUser.username,
+            telegramId: {
+              startsWith: "temp_",
+            },
+          },
+        });
+
+        if (tempUser) {
+          user = await this.prisma.user.update({
+            where: { id: tempUser.id },
+            data: {
+              telegramId: telegramUser.id.toString(),
+              firstName: telegramUser.first_name,
+              lastName: telegramUser.last_name,
+              isWatchOnly: false,
+            },
+          });
+        }
+      }
+
+      // 如果仍然没有用户，创建新用户
+      if (!user) {
+        user = await this.prisma.user.create({
+          data: {
+            telegramId: telegramUser.id.toString(),
+            username: telegramUser.username,
+            firstName: telegramUser.first_name,
+            lastName: telegramUser.last_name,
+          },
+        });
+      }
     }
 
     return user;

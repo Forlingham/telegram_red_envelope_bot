@@ -351,35 +351,54 @@ export class RedpacketService {
 
     // 为没有地址的用户创建待处理转账记录
     for (const telegramId of usersWithoutAddress) {
-      const user = await this.prisma.user.findUnique({
+      //尝试通过 telegramId 查找用户
+      let user = await this.prisma.user.findUnique({
         where: { telegramId },
       });
 
-      if (user) {
-        // 使用 userAmounts 获取该用户应得的金额
-        const userAmount = userAmounts.get(telegramId)?.toFixed(8) || "0";
-
-        // 创建红包领取记录（等待中）
-        await this.prisma.redPacketClaim.create({
-          data: {
-            redPacketId: redPacket.id,
-            userId: user.id,
-            amount: userAmount,
-            status: TransferStatus.PENDING,
-          },
+      // 如果没找到，尝试通过 username 查找
+      if (!user) {
+        user = await this.prisma.user.findFirst({
+          where: { username: telegramId },
         });
+      }
 
-        // 创建统筹转账记录
-        await this.prisma.poolingTransfer.create({
+      // 如果用户仍然不存在，需要创建临时用户记录
+      if (!user) {
+        const tempId = `temp_${telegramId}_${Date.now()}`;
+        user = await this.prisma.user.create({
           data: {
-            userId: user.id,
-            type: "REDPACKET_CLAIM",
-            amount: userAmount,
-            status: TransferStatus.PENDING,
-            errorMessage: "用户未绑定钱包地址，等待绑定后转账",
+            telegramId: tempId,
+            username: telegramId,
+            firstName: "Unknown",
+            isWatchOnly: true,
           },
         });
       }
+
+      // 使用原始 telegramId 获取金额
+      const userAmount = userAmounts.get(telegramId)?.toFixed(8) || "0";
+
+      // 创建红包领取记录（等待中）
+      await this.prisma.redPacketClaim.create({
+        data: {
+          redPacketId: redPacket.id,
+          userId: user.id,
+          amount: userAmount,
+          status: TransferStatus.PENDING,
+        },
+      });
+
+      // 创建统筹转账记录
+      await this.prisma.poolingTransfer.create({
+        data: {
+          userId: user.id,
+          type: "REDPACKET_CLAIM",
+          amount: userAmount,
+          status: TransferStatus.PENDING,
+          errorMessage: "用户未绑定钱包地址，等待绑定后转账",
+        },
+      });
     }
 
     // 获取所有目标用户的信息（用于显示）
@@ -572,13 +591,15 @@ export class RedpacketService {
           address: user.wallet.address,
           amount: new Big(0),
         });
+        // 使用原始的 telegramId 作为 key
         allUsers.push({
-          telegramId: user.telegramId,
+          telegramId: telegramId,
           address: user.wallet.address,
         });
       } else {
         usersWithoutAddress.push(telegramId);
-        allUsers.push({ telegramId, address: undefined });
+        // 使用原始的 telegramId 作为 key
+        allUsers.push({ telegramId: telegramId, address: undefined });
       }
     }
 
