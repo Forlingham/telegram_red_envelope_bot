@@ -80,6 +80,11 @@ export class RedpacketService {
     redPacket?: RedPacket;
     message?: string;
     txid?: string;
+    recipients?: {
+      telegramId: string;
+      username: string | null;
+      amount: string;
+    }[];
   }> {
     try {
       // 验证参数
@@ -145,9 +150,15 @@ export class RedpacketService {
     redPacket?: RedPacket;
     message?: string;
     txid?: string;
+    recipients?: {
+      telegramId: string;
+      username: string | null;
+      amount: string;
+    }[];
   }> {
     // 确定目标用户列表
     let targetTelegramIds: string[] = [];
+    let activityMap: Record<string, number> = {};
     if (input.type === RedPacketType.DIRECT && input.targetUsers) {
       targetTelegramIds = input.targetUsers;
     } else if (input.type === RedPacketType.ACTIVITY_TOP && input.topN) {
@@ -157,6 +168,13 @@ export class RedpacketService {
         input.topN,
       );
       targetTelegramIds = activeUsers.map((u) => u.telegramId);
+      activityMap = activeUsers.reduce(
+        (map, u) => {
+          map[u.telegramId] = u.messageCount;
+          return map;
+        },
+        {} as Record<string, number>,
+      );
     }
 
     if (targetTelegramIds.length === 0) {
@@ -169,6 +187,7 @@ export class RedpacketService {
       totalAmount,
       input.count,
       input.strategy,
+      activityMap,
     );
 
     if (recipients.length === 0) {
@@ -298,11 +317,28 @@ export class RedpacketService {
       }
     }
 
+    // 获取 recipients 的用户信息
+    const recipientUserIds = await Promise.all(
+      recipients.map(async (r) => {
+        const user = await this.prisma.user.findFirst({
+          where: {
+            OR: [{ telegramId: r.telegramId }, { username: r.telegramId }],
+          },
+        });
+        return user;
+      }),
+    );
+
     return {
       success: true,
       redPacket,
       txid: broadcastResult.txid,
       message: `红包创建成功，已转账给 ${recipients.length} 位用户，${usersWithoutAddress.length} 位用户等待绑定地址`,
+      recipients: recipients.map((r, index) => ({
+        telegramId: r.telegramId,
+        username: recipientUserIds[index]?.username || null,
+        amount: r.amount.toFixed(8),
+      })),
     };
   }
 
@@ -424,6 +460,7 @@ export class RedpacketService {
     totalAmount: Big,
     count: number,
     strategy?: RedPacketStrategy,
+    activityMap?: Record<string, number>,
   ): Promise<{ telegramId: string; address: string; amount: Big }[]> {
     const recipients: { telegramId: string; address: string; amount: Big }[] =
       [];
@@ -461,9 +498,33 @@ export class RedpacketService {
       // 均分
       const equalAmount = totalAmount.div(count);
       recipients.forEach((r) => (r.amount = equalAmount));
+    } else if (strategy === RedPacketStrategy.RANK && activityMap) {
+      // 按活跃度排序分配
+      const totalActivity = recipients.reduce((sum, r) => {
+        const activity = activityMap[r.telegramId] || 1;
+        return sum + activity;
+      }, 0);
+
+      let remainingAmount = totalAmount;
+      const sortedRecipients = [...recipients].sort((a, b) => {
+        const activityA = activityMap[a.telegramId] || 0;
+        const activityB = activityMap[b.telegramId] || 0;
+        return activityB - activityA;
+      });
+
+      sortedRecipients.forEach((r, index) => {
+        const activity = activityMap[r.telegramId] || 1;
+        if (index === sortedRecipients.length - 1) {
+          r.amount = remainingAmount;
+        } else {
+          const ratio = activity / totalActivity;
+          const amount = totalAmount.mul(ratio);
+          r.amount = amount;
+          remainingAmount = remainingAmount.minus(amount);
+        }
+      });
     } else {
-      // 随机分配（简化处理，平均分配）
-      // TODO: 可以优化为随机分配算法
+      // 默认均分
       const avgAmount = totalAmount.div(recipients.length);
       recipients.forEach((r) => (r.amount = avgAmount));
     }
@@ -472,21 +533,31 @@ export class RedpacketService {
   }
 
   /**
-   * 获取活跃用户列表
+   * 获取活跃用户列表（最近30分钟）
    */
   private async getTopActiveUsers(
     chatId: string,
     topN: number,
-  ): Promise<{ telegramId: string; messageCount: number }[]> {
-    const activities = await this.prisma.userActivity.findMany({
-      where: { chatId },
-      orderBy: { messageCount: "desc" },
-      take: topN,
-      include: { user: true },
-    });
+  ): Promise<{ userId: number; telegramId: string; messageCount: number }[]> {
+    const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000);
 
-    return activities.map((a) => ({
-      telegramId: a.user.telegramId,
+    const activities = await this.prisma.$queryRaw`
+      SELECT 
+        u.id as "userId",
+        u.telegram_id as "telegramId",
+        COUNT(uar.id)::int as "messageCount"
+      FROM user_activity_records uar
+      JOIN users u ON u.id = uar.user_id
+      WHERE uar.chat_id = ${chatId}
+        AND uar.created_at > ${thirtyMinutesAgo}
+      GROUP BY u.id, u.telegram_id
+      ORDER BY "messageCount" DESC
+      LIMIT ${topN}
+    `;
+
+    return (activities as any[]).map((a) => ({
+      userId: a.userId,
+      telegramId: a.telegramId,
       messageCount: a.messageCount,
     }));
   }

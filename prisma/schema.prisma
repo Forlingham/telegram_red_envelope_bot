@@ -22,7 +22,8 @@ model User {
   redPacketsSent    RedPacket[]       @relation("SentRedPackets")
   claims            RedPacketClaim[]
   poolingTransfers  PoolingTransfer[]
-  activityRecords   UserActivity[]
+  activityRecords   UserActivityRecord[]
+  dailyActivities   UserActivity[]    @relation("UserDailyActivities")
   
   @@map("users")
 }
@@ -111,6 +112,7 @@ enum RedPacketType {
 enum RedPacketStrategy {
   EQUAL
   RANDOM
+  RANK
 }
 
 enum RedPacketStatus {
@@ -178,7 +180,7 @@ enum TransferStatus {
   RETRYING
 }
 
-// 用户活跃度记录
+// 用户活跃度记录（按天统计）
 model UserActivity {
   id                Int               @id @default(autoincrement())
   userId            Int               @map("user_id")
@@ -187,11 +189,24 @@ model UserActivity {
   lastMessageAt     DateTime?         @map("last_message_at")
   recordedDate      DateTime          @default(now()) @map("recorded_date")
   
-  user              User              @relation(fields: [userId], references: [id])
+  user              User              @relation("UserDailyActivities", fields: [userId], references: [id])
   
   @@unique([userId, chatId, recordedDate])
   @@index([chatId, recordedDate])
   @@map("user_activities")
+}
+
+// 用户活跃记录（每条消息记录，用于实时统计）
+model UserActivityRecord {
+  id                Int               @id @default(autoincrement())
+  userId            Int               @map("user_id")
+  chatId            String            @map("chat_id")
+  createdAt         DateTime          @default(now()) @map("created_at")
+  
+  user              User              @relation(fields: [userId], references: [id])
+  
+  @@index([chatId, createdAt])
+  @@map("user_activity_records")
 }
 
 // 区块同步状态

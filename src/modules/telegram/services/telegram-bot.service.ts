@@ -89,6 +89,9 @@ export class TelegramBotService implements OnModuleInit {
 • /transfer - 普通转账到指定地址
 • 在群内点击红包消息抢红包
 
+💬 群排行：
+• /rank - 查看最近30分钟活跃排行
+
 💰 钱包管理：
 • /balance - 查询钱包余额
 • /bind <地址> - 绑定只读钱包
@@ -184,6 +187,60 @@ export class TelegramBotService implements OnModuleInit {
       } catch (error) {
         this.logger.error(`查询余额失败: ${error.message}`);
         this.bot.sendMessage(chatId, "❌ 查询余额失败，请稍后重试");
+      }
+    });
+
+    // /rank 命令 - 查看群活跃排行
+    this.bot.onText(/\/rank/, async (msg) => {
+      const chatId = msg.chat.id;
+
+      if (msg.chat.type === "private") {
+        this.bot.sendMessage(chatId, "❌ 请在群聊中使用此命令");
+        return;
+      }
+
+      this.bot.sendMessage(chatId, "⏳ 查询活跃排行...");
+
+      try {
+        const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000);
+        const chatIdStr = chatId.toString();
+
+        const rankings = await this.prisma.$queryRaw`
+          SELECT 
+            u.username,
+            u.first_name as "firstName",
+            COUNT(uar.id)::int as "messageCount"
+          FROM user_activity_records uar
+          JOIN users u ON u.id = uar.user_id
+          WHERE uar.chat_id = ${chatIdStr}
+            AND uar.created_at > ${thirtyMinutesAgo}
+          GROUP BY u.id, u.username, u.first_name
+          ORDER BY "messageCount" DESC
+          LIMIT 10
+        `;
+
+        const results = rankings as any[];
+
+        if (results.length === 0) {
+          this.bot.sendMessage(
+            chatId,
+            "📊 最近30分钟暂无活跃用户\n\n快来发言吧！",
+          );
+          return;
+        }
+
+        let message = "📊 群活跃排行（最近30分钟）\n\n";
+
+        results.forEach((r, index) => {
+          const name = r.username || r.firstName || "未知用户";
+          const displayName = r.username ? `@${r.username}` : name;
+          message += `${index + 1}. ${displayName}: ${r.messageCount} 条消息\n`;
+        });
+
+        this.bot.sendMessage(chatId, message);
+      } catch (error) {
+        this.logger.error(`查询活跃排行失败: ${error.message}`);
+        this.bot.sendMessage(chatId, "❌ 查询活跃排行失败，请稍后重试");
       }
     });
 
@@ -581,10 +638,16 @@ ${label} 请输入中奖人数：
 
           if (result.success) {
             if (session.data.chatId.startsWith("-")) {
+              // 活跃红包需要传递 recipients 显示获得者
+              const recipients =
+                result.recipients && result.recipients.length > 0
+                  ? result.recipients
+                  : undefined;
               await this.sendRedPacketToGroup(
                 result.redPacket,
                 session.data.chatId,
                 result.txid,
+                recipients,
               );
               await this.deleteUserMessages(session.data.chatId, session);
             } else {
@@ -604,11 +667,56 @@ ${label} 请输入中奖人数：
         }
       }
 
+      // 处理活跃红包分配方式选择
+      if (data.startsWith("strategy:")) {
+        const strategy = data.split(":")[1];
+        const session = this.userSessions.get(userId);
+
+        if (session && session.step === "send_packet_strategy") {
+          // 删除选择消息
+          if (query.message) {
+            try {
+              await this.bot.deleteMessage(chatId, query.message.message_id);
+            } catch (e) {}
+          }
+
+          if (strategy === "EQUAL") {
+            session.data.strategy = RedPacketStrategy.EQUAL;
+          } else if (strategy === "RANK") {
+            session.data.strategy = RedPacketStrategy.RANK;
+          } else {
+            session.data.strategy = RedPacketStrategy.RANDOM;
+          }
+
+          session.step = "send_packet_message";
+          await this.sendAndDeleteOld(
+            chatId,
+            session,
+            "💬 请输入红包留言（可选）：",
+            {
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: "跳过", callback_data: "skip_message" }],
+                ],
+              },
+            },
+          );
+        }
+      }
+
       // 跳过留言
       if (data === "skip_message") {
         const session = this.userSessions.get(userId);
         if (session && session.step === "send_packet_message") {
           session.data.message = "恭喜发财，大吉大利！";
+
+          // 活跃红包/抽奖红包设置 count = topN
+          if (
+            session.data.type === RedPacketType.ACTIVITY_TOP ||
+            session.data.type === RedPacketType.ACTIVITY_LOTTERY
+          ) {
+            session.data.count = session.data.topN;
+          }
 
           if (
             session.data.type === RedPacketType.GROUP_EQUAL ||
@@ -636,10 +744,9 @@ ${label} 请输入中奖人数：
 
 类型: ${this.getPacketTypeLabel(session.data.type)}
 金额: ${session.data.amount} SCASH
-份数: ${session.data.count}
-留言: ${session.data.message}
 `;
 
+          // 定向红包显示目标用户
           if (
             session.data.type === RedPacketType.DIRECT &&
             session.data.targetUsers
@@ -647,13 +754,32 @@ ${label} 请输入中奖人数：
             confirmMessage += `\n目标用户: @${session.data.targetUsers.join(", @")}`;
           }
 
+          // 活跃红包/抽奖红包显示中奖人数
           if (
-            (session.data.type === RedPacketType.ACTIVITY_TOP ||
-              session.data.type === RedPacketType.ACTIVITY_LOTTERY) &&
-            session.data.topN
+            session.data.type === RedPacketType.ACTIVITY_TOP ||
+            session.data.type === RedPacketType.ACTIVITY_LOTTERY
           ) {
-            confirmMessage += `\n中奖人数: ${session.data.topN}`;
+            if (session.data.topN) {
+              confirmMessage += `\n中奖人数: ${session.data.topN}`;
+            }
+          } else if (session.data.type !== RedPacketType.DIRECT) {
+            // 普通群红包显示份数
+            confirmMessage += `\n份数: ${session.data.count}`;
           }
+
+          // 显示分配方式
+          if (
+            session.data.type === RedPacketType.ACTIVITY_TOP ||
+            session.data.type === RedPacketType.ACTIVITY_LOTTERY
+          ) {
+            const strategyLabel =
+              session.data.strategy === RedPacketStrategy.EQUAL
+                ? "⚖️ 均分"
+                : "🔥 按活跃度排序";
+            confirmMessage += `\n分配方式: ${strategyLabel}`;
+          }
+
+          confirmMessage += `\n留言: ${session.data.message}`;
 
           const networkFee = 0.00001;
           const isGroupRedPacket =
@@ -776,6 +902,12 @@ ${label} 请输入中奖人数：
     this.bot.on("message", async (msg) => {
       const userId = msg.from.id;
       const session = this.userSessions.get(userId);
+
+      // 记录用户在群组的活跃度
+      if (msg.chat.type !== "private" && msg.from) {
+        const user = await this.getOrCreateUser(msg.from);
+        await this.recordUserActivity(user.id, msg.chat.id.toString());
+      }
 
       // 保存用户在群组中的输入消息ID，稍后批量删除
       if (msg.chat.type !== "private" && msg.message_id && session) {
@@ -903,6 +1035,36 @@ ${label} 请输入中奖人数：
                 },
               },
             );
+          } else if (
+            session.data.type === RedPacketType.ACTIVITY_TOP ||
+            session.data.type === RedPacketType.ACTIVITY_LOTTERY
+          ) {
+            // 活跃红包/抽奖红包：选择分配方式
+            session.step = "send_packet_strategy";
+            const keyboard = {
+              reply_markup: {
+                inline_keyboard: [
+                  [
+                    {
+                      text: "⚖️ 均分",
+                      callback_data: "strategy:EQUAL",
+                    },
+                  ],
+                  [
+                    {
+                      text: "🔥 按活跃度排序",
+                      callback_data: "strategy:RANK",
+                    },
+                  ],
+                ],
+              },
+            };
+            await this.sendAndDeleteOld(
+              msg.chat.id,
+              session,
+              "💡 请选择分配方式：",
+              keyboard,
+            );
           } else {
             session.step = "send_packet_count";
             await this.sendAndDeleteOld(
@@ -958,8 +1120,6 @@ ${label} 请输入中奖人数：
 
 类型: ${this.getPacketTypeLabel(session.data.type)}
 金额: ${session.data.amount} SCASH
-份数: ${session.data.count}
-留言: ${session.data.message}
 `;
 
           // 定向红包显示目标用户
@@ -970,14 +1130,34 @@ ${label} 请输入中奖人数：
             confirmMessage += `\n目标用户: @${session.data.targetUsers.join(", @")}`;
           }
 
-          // 活跃红包显示中奖人数
+          // 活跃红包/抽奖红包显示中奖人数
           if (
-            (session.data.type === RedPacketType.ACTIVITY_TOP ||
-              session.data.type === RedPacketType.ACTIVITY_LOTTERY) &&
-            session.data.topN
+            session.data.type === RedPacketType.ACTIVITY_TOP ||
+            session.data.type === RedPacketType.ACTIVITY_LOTTERY
           ) {
-            confirmMessage += `\n中奖人数: ${session.data.topN}`;
+            if (session.data.topN) {
+              confirmMessage += `\n中奖人数: ${session.data.topN}`;
+            }
+          } else if (session.data.type === RedPacketType.DIRECT) {
+            // 定向红包不需要显示份数
+          } else {
+            // 普通群红包显示份数
+            confirmMessage += `\n份数: ${session.data.count}`;
           }
+
+          // 显示分配方式
+          if (
+            session.data.type === RedPacketType.ACTIVITY_TOP ||
+            session.data.type === RedPacketType.ACTIVITY_LOTTERY
+          ) {
+            const strategyLabel =
+              session.data.strategy === RedPacketStrategy.EQUAL
+                ? "⚖️ 均分"
+                : "🔥 按活跃度排序";
+            confirmMessage += `\n分配方式: ${strategyLabel}`;
+          }
+
+          confirmMessage += `\n留言: ${session.data.message}`;
 
           // 计算预估手续费
           const networkFee = 0.00001; // 网络手续费
@@ -1118,6 +1298,7 @@ ${label} 请输入中奖人数：
     redPacket: any,
     chatId: string,
     txid?: string,
+    recipients?: { telegramId: string; username?: string; amount: string }[],
   ) {
     const typeLabels = {
       [RedPacketType.DIRECT]: "🎯 定向红包",
@@ -1127,10 +1308,41 @@ ${label} 请输入中奖人数：
       [RedPacketType.ACTIVITY_LOTTERY]: "🎰 抽奖红包",
     };
 
+    const strategyLabels = {
+      [RedPacketStrategy.EQUAL]: "⚖️ 均分",
+      [RedPacketStrategy.RANDOM]: "🎲 随机",
+      [RedPacketStrategy.RANK]: "🔥 按活跃度排序",
+    };
+
     let message: string;
     let options: TelegramBot.SendMessageOptions = {};
 
-    if (redPacket.type === RedPacketType.DIRECT) {
+    // 活跃红包/抽奖红包：直接显示获得者和金额，不需要抢
+    if (
+      redPacket.type === RedPacketType.ACTIVITY_TOP ||
+      redPacket.type === RedPacketType.ACTIVITY_LOTTERY
+    ) {
+      let recipientsText = "";
+      if (recipients && recipients.length > 0) {
+        recipientsText = "\n🎉 获得者：\n";
+        recipients.forEach((r, index) => {
+          const name = r.username || r.telegramId;
+          const displayName = r.username ? `@${r.username}` : name;
+          recipientsText += `${index + 1}. ${displayName}: ${r.amount} SCASH\n`;
+        });
+      }
+
+      message = `
+🧧 ${typeLabels[redPacket.type] || "红包"}
+
+💰 总金额: ${redPacket.totalAmount} SCASH
+👥 中奖人数: ${redPacket.count}
+📊 分配方式: ${strategyLabels[redPacket.strategy] || "⚖️ 均分"}
+💬 ${redPacket.message}
+${txid ? `\n🔗 交易: \`${txid}\`` : ""}
+${recipientsText}
+      `;
+    } else if (redPacket.type === RedPacketType.DIRECT) {
       const targetUsers = redPacket.targetUsers
         ? JSON.parse(redPacket.targetUsers)
         : [];
@@ -1228,6 +1440,19 @@ ${txid ? `\n🔗 交易: \`${txid}\`` : ""}
       try {
         await this.bot.deleteMessage(chatId, msgId);
       } catch (e) {}
+    }
+  }
+
+  private async recordUserActivity(userId: number, chatId: string) {
+    try {
+      await this.prisma.userActivityRecord.create({
+        data: {
+          userId,
+          chatId,
+        },
+      });
+    } catch (error) {
+      this.logger.error(`记录用户活跃度失败: ${error.message}`);
     }
   }
 

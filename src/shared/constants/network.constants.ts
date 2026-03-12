@@ -1,10 +1,10 @@
-import * as bitcoin from 'bitcoinjs-lib';
+import * as bitcoin from "bitcoinjs-lib";
 
 // Scash Regtest 网络配置
 export const ScashNetwork = {
   REGTEST: {
-    messagePrefix: '\x18Scash Signed Message:\n',
-    bech32: 'bcrt',
+    messagePrefix: "\x18Scash Signed Message:\n",
+    bech32: "bcrt",
     bip32: {
       public: 0x0488b21e,
       private: 0x0488ade4,
@@ -17,34 +17,35 @@ export const ScashNetwork = {
 
 // 红包类型
 export enum RedPacketType {
-  DIRECT = 'DIRECT',
-  GROUP_EQUAL = 'GROUP_EQUAL',
-  GROUP_RANDOM = 'GROUP_RANDOM',
-  ACTIVITY_TOP = 'ACTIVITY_TOP',
-  ACTIVITY_LOTTERY = 'ACTIVITY_LOTTERY',
+  DIRECT = "DIRECT",
+  GROUP_EQUAL = "GROUP_EQUAL",
+  GROUP_RANDOM = "GROUP_RANDOM",
+  ACTIVITY_TOP = "ACTIVITY_TOP",
+  ACTIVITY_LOTTERY = "ACTIVITY_LOTTERY",
 }
 
 // 红包分发策略
 export enum RedPacketStrategy {
-  EQUAL = 'EQUAL',
-  RANDOM = 'RANDOM',
+  EQUAL = "EQUAL",
+  RANDOM = "RANDOM",
+  RANK = "RANK",
 }
 
 // 红包状态
 export enum RedPacketStatus {
-  ACTIVE = 'ACTIVE',
-  COMPLETED = 'COMPLETED',
-  EXPIRED = 'EXPIRED',
-  REFUNDED = 'REFUNDED',
+  ACTIVE = "ACTIVE",
+  COMPLETED = "COMPLETED",
+  EXPIRED = "EXPIRED",
+  REFUNDED = "REFUNDED",
 }
 
 // 转账状态
 export enum TransferStatus {
-  PENDING = 'PENDING',
-  PROCESSING = 'PROCESSING',
-  COMPLETED = 'COMPLETED',
-  FAILED = 'FAILED',
-  RETRYING = 'RETRYING',
+  PENDING = "PENDING",
+  PROCESSING = "PROCESSING",
+  COMPLETED = "COMPLETED",
+  FAILED = "FAILED",
+  RETRYING = "RETRYING",
 }
 
 // 默认配置
