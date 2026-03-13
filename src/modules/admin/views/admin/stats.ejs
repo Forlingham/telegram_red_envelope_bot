@@ -1,0 +1,82 @@
+<%- include('../layout') %>
+            <div class="stats">
+                <div class="stat-card">
+                    <h4>红包类型分布</h4>
+                    <table class="table">
+                        <tr><th>类型</th><th>数量</th><th>总金额</th></tr>
+                        <% redPacketStats.byType.forEach(item => { %>
+                        <tr>
+                            <td><%= item.type %></td>
+                            <td><%= item._count %></td>
+                            <td><%= Number(item._sum.totalAmount || 0).toFixed(4) %></td>
+                        </tr>
+                        <% }) %>
+                    </table>
+                </div>
+                <div class="stat-card">
+                    <h4>红包状态分布</h4>
+                    <table class="table">
+                        <tr><th>状态</th><th>数量</th></tr>
+                        <% redPacketStats.byStatus.forEach(item => { %>
+                        <tr>
+                            <td><%= item.status %></td>
+                            <td><%= item._count %></td>
+                        </tr>
+                        <% }) %>
+                    </table>
+                </div>
+                <div class="stat-card">
+                    <h4>转账状态分布</h4>
+                    <table class="table">
+                        <tr><th>状态</th><th>数量</th><th>总金额</th></tr>
+                        <% transferStats.byStatus.forEach(item => { %>
+                        <tr>
+                            <td><%= item.status %></td>
+                            <td><%= item._count %></td>
+                            <td><%= Number(item._sum.amount || 0).toFixed(4) %></td>
+                        </tr>
+                        <% }) %>
+                    </table>
+                </div>
+                <div class="stat-card">
+                    <h4>转账类型分布</h4>
+                    <table class="table">
+                        <tr><th>类型</th><th>数量</th><th>总金额</th></tr>
+                        <% transferStats.byType.forEach(item => { %>
+                        <tr>
+                            <td><%= item.type %></td>
+                            <td><%= item._count %></td>
+                            <td><%= Number(item._sum.amount || 0).toFixed(4) %></td>
+                        </tr>
+                        <% }) %>
+                    </table>
+                </div>
+            </div>
+            <div class="card">
+                <h3>Top 发红包用户</h3>
+                <table class="table">
+                    <tr><th>用户</th><th>发红包数</th></tr>
+                    <% topUsers.topSenders.forEach(user => { %>
+                    <tr>
+                        <td><%= user.username || user.telegramId %></td>
+                        <td><%= user._count.redPacketsSent %></td>
+                    </tr>
+                    <% }) %>
+                </table>
+            </div>
+            <div class="card">
+                <h3>Top 抢红包用户</h3>
+                <table class="table">
+                    <tr><th>用户</th><th>抢红包数</th></tr>
+                    <% topUsers.topClaimers.forEach(user => { %>
+                    <tr>
+                        <td><%= user.username || user.telegramId %></td>
+                        <td><%= user._count.claims %></td>
+                    </tr>
+                    <% }) %>
+                </table>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

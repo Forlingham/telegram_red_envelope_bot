@@ -1,0 +1,58 @@
+<%- include('../layout') %>
+            <div class="nav">
+                <a href="/redpackets" class="">全部</a>
+                <a href="/redpackets?status=ACTIVE" class="">进行中</a>
+                <a href="/redpackets?status=COMPLETED" class="">已完成</a>
+                <a href="/redpackets?status=EXPIRED" class="">已过期</a>
+                <a href="/redpackets?status=REFUNDED" class="">已退款</a>
+            </div>
+            <div class="card">
+                <h3>红包列表 (共 <%= total %> 条)</h3>
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>类型</th>
+                            <th>总金额</th>
+                            <th>剩余</th>
+                            <th>份数/已领</th>
+                            <th>状态</th>
+                            <th>发送者</th>
+                            <th>创建时间</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <% redPackets.forEach(rp => { %>
+                        <tr>
+                            <td><%= rp.id %></td>
+                            <td><%= rp.type %></td>
+                            <td><%= Number(rp.totalAmount).toFixed(4) %></td>
+                            <td><%= Number(rp.remainingAmount).toFixed(4) %></td>
+                            <td><%= rp.count %>/<%= rp.claims.length %></td>
+                            <td>
+                                <% 
+                                const statusClass = {
+                                    'ACTIVE': 'badge-success',
+                                    'COMPLETED': 'badge-primary',
+                                    'EXPIRED': 'badge-warning',
+                                    'REFUNDED': 'badge-danger'
+                                }[rp.status]; 
+                                %>
+                                <span class="badge <%= statusClass %>"><%= rp.status %></span>
+                            </td>
+                            <td><%= rp.sender ? rp.sender.username : '-' %></td>
+                            <td><%= rp.createdAt.toLocaleString('zh-CN') %></td>
+                        </tr>
+                        <% }) %>
+                    </tbody>
+                </table>
+                <div class="pagination">
+                    <% for(let i = 1; i <= totalPages; i++) { %>
+                    <a href="/redpackets?page=<%= i %>" class="<%= page === i ? 'active' : '' %>"><%= i %></a>
+                    <% } %>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

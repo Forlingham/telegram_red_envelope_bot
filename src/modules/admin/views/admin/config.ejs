@@ -1,0 +1,17 @@
+<%- include('../layout') %>
+            <div class="card">
+                <h3>系统配置</h3>
+                <table class="table">
+                    <tr><th>配置键</th><th>配置值</th></tr>
+                    <% Object.keys(configs).forEach(key => { %>
+                    <tr>
+                        <td><%= key %></td>
+                        <td><%= configs[key] %></td>
+                    </tr>
+                    <% }) %>
+                </table>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

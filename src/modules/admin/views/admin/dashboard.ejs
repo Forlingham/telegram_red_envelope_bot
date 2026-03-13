@@ -1,0 +1,38 @@
+<%- include('../layout') %>
+            <h1 class="page-title">📊 数据概览</h1>
+            
+            <div class="card">
+                <h3>📈 30天趋势数据</h3>
+                <% if (daily.dailyUsers && daily.dailyUsers.length > 0) { %>
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>日期</th>
+                            <th>新增用户</th>
+                            <th>红包数</th>
+                            <th>红包金额</th>
+                            <th>领取数</th>
+                            <th>领取金额</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <% daily.dailyUsers.forEach((item, index) => { %>
+                        <tr>
+                            <td><%= item.date %></td>
+                            <td><%= item.count %></td>
+                            <td><%= daily.dailyRedPackets[index] ? daily.dailyRedPackets[index].count : 0 %></td>
+                            <td><%= Number(daily.dailyRedPackets[index] ? (daily.dailyRedPackets[index].volume || 0) : 0).toFixed(4) %></td>
+                            <td><%= daily.dailyClaims[index] ? daily.dailyClaims[index].count : 0 %></td>
+                            <td><%= Number(daily.dailyClaims[index] ? (daily.dailyClaims[index].volume || 0) : 0).toFixed(4) %></td>
+                        </tr>
+                        <% }) %>
+                    </tbody>
+                </table>
+                <% } else { %>
+                <div class="empty">暂无数据</div>
+                <% } %>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

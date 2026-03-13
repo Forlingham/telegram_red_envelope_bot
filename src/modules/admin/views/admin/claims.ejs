@@ -1,0 +1,48 @@
+<%- include('../layout') %>
+            <div class="card">
+                <h3>领取记录 (共 <%= total %> 条)</h3>
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>红包ID</th>
+                            <th>用户</th>
+                            <th>金额</th>
+                            <th>状态</th>
+                            <th>交易ID</th>
+                            <th>领取时间</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <% claims.forEach(claim => { %>
+                        <tr>
+                            <td><%= claim.id %></td>
+                            <td><%= claim.redPacketId %></td>
+                            <td><%= claim.user ? claim.user.username : '-' %></td>
+                            <td><%= Number(claim.amount).toFixed(4) %></td>
+                            <td>
+                                <% 
+                                const statusClass = {
+                                    'PENDING': 'badge-warning',
+                                    'COMPLETED': 'badge-success',
+                                    'FAILED': 'badge-danger'
+                                }[claim.status]; 
+                                %>
+                                <span class="badge <%= statusClass %>"><%= claim.status %></span>
+                            </td>
+                            <td><%= claim.txid || '-' %></td>
+                            <td><%= claim.claimedAt.toLocaleString('zh-CN') %></td>
+                        </tr>
+                        <% }) %>
+                    </tbody>
+                </table>
+                <div class="pagination">
+                    <% for(let i = 1; i <= totalPages; i++) { %>
+                    <a href="/claims?page=<%= i %>" class="<%= page === i ? 'active' : '' %>"><%= i %></a>
+                    <% } %>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

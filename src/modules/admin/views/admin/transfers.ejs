@@ -1,0 +1,59 @@
+<%- include('../layout') %>
+            <div class="nav">
+                <a href="/transfers" class="">全部</a>
+                <a href="/transfers?status=PENDING" class="">待处理</a>
+                <a href="/transfers?status=PROCESSING" class="">处理中</a>
+                <a href="/transfers?status=COMPLETED" class="">已完成</a>
+                <a href="/transfers?status=FAILED" class="">失败</a>
+            </div>
+            <div class="card">
+                <h3>转账记录 (共 <%= total %> 条)</h3>
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>用户</th>
+                            <th>类型</th>
+                            <th>金额</th>
+                            <th>状态</th>
+                            <th>交易ID</th>
+                            <th>重试次数</th>
+                            <th>创建时间</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <% transfers.forEach(transfer => { %>
+                        <tr>
+                            <td><%= transfer.id %></td>
+                            <td><%= transfer.user ? transfer.user.username : '-' %></td>
+                            <td><%= transfer.type %></td>
+                            <td><%= Number(transfer.amount).toFixed(4) %></td>
+                            <td>
+                                <% 
+                                const statusClass = {
+                                    'PENDING': 'badge-warning',
+                                    'PROCESSING': 'badge-info',
+                                    'RETRYING': 'badge-primary',
+                                    'COMPLETED': 'badge-success',
+                                    'FAILED': 'badge-danger'
+                                }[transfer.status]; 
+                                %>
+                                <span class="badge <%= statusClass %>"><%= transfer.status %></span>
+                            </td>
+                            <td><%= transfer.txid || '-' %></td>
+                            <td><%= transfer.retryCount %></td>
+                            <td><%= transfer.createdAt.toLocaleString('zh-CN') %></td>
+                        </tr>
+                        <% }) %>
+                    </tbody>
+                </table>
+                <div class="pagination">
+                    <% for(let i = 1; i <= totalPages; i++) { %>
+                    <a href="/transfers?page=<%= i %>" class="<%= page === i ? 'active' : '' %>"><%= i %></a>
+                    <% } %>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
