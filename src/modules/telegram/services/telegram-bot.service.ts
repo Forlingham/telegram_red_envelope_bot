@@ -1530,6 +1530,13 @@ export class TelegramBotService implements OnModuleInit {
     let message: string;
     let options: TelegramBot.SendMessageOptions = {};
 
+    const sender = (redPacket as any).sender;
+    const senderInfo = sender?.username
+      ? `@${sender.username}`
+      : sender?.telegramId
+        ? sender.telegramId
+        : "未知";
+
     // 活跃红包/抽奖红包：直接显示获得者和金额，不需要抢
     if (
       redPacket.type === RedPacketType.ACTIVITY_TOP ||
@@ -1551,6 +1558,7 @@ export class TelegramBotService implements OnModuleInit {
       message = `
 🧧 ${typeLabels[redPacket.type] || "红包"}
 
+👤 发红包: ${senderInfo}
 💰 总金额: ${redPacket.totalAmount} SCASH
 👥 中奖人数: ${redPacket.count}
 📊 分配方式: ${strategyLabels[redPacket.strategy] || "⚖️ 均分"}
@@ -1565,6 +1573,7 @@ ${recipientsText}
       message = `
 🎯 定向红包
 
+👤 发红包: ${senderInfo}
 💰 金额: ${redPacket.totalAmount} SCASH
 👤 接收: @${targetUsers[0] || "未知"}
 💬 ${redPacket.message}
@@ -1574,6 +1583,7 @@ ${txid ? `\n🔗 交易: \`${txid}\`` : ""}
       message = `
 🧧 ${typeLabels[redPacket.type] || "红包"}
 
+👤 发红包: ${senderInfo}
 💰 总金额: ${redPacket.totalAmount} SCASH
 📦 份数: ${redPacket.count}
 💬 ${redPacket.message}
@@ -1611,13 +1621,59 @@ ${txid ? `\n🔗 交易: \`${txid}\`` : ""}
     const remainingCount = details.redPacket.remainingCount;
     const totalCount = details.redPacket.count;
     const claimedCount = totalCount - remainingCount;
+    const typeLabels = {
+      DIRECT: "🎯 定向红包",
+      GROUP_EQUAL: "⚖️ 均分红包",
+      GROUP_RANDOM: "🎲 随机红包",
+      ACTIVITY_TOP: "🔥 活跃红包",
+      ACTIVITY_LOTTERY: "🎰 抽奖红包",
+    };
 
-    // 更新按钮文本
+    const sender = details.redPacket.sender;
+    const senderInfo = sender?.username
+      ? `@${sender.username}`
+      : sender?.telegramId
+        ? sender.telegramId
+        : "未知";
+
+    let messageText = `
+🧧 ${typeLabels[details.redPacket.type] || "红包"}
+
+👤 发红包: ${senderInfo}
+💰 总金额: ${details.redPacket.totalAmount} SCASH
+📦 份数: ${totalCount}
+💬 ${details.redPacket.message}
+    `;
+
+    if (details.claims.length > 0) {
+      const claimedList = details.claims
+        .slice(0, 10)
+        .map(
+          (c) =>
+            `• @${c.user.username || c.user.telegramId}: ${c.amount} SCASH`,
+        )
+        .join("\n");
+
+      messageText += `\n`;
+      messageText += `\n✅ 已抢到 (${claimedCount}/${totalCount}):\n${claimedList}`;
+
+      if (details.claims.length > 10) {
+        messageText += `\n... 还有 ${details.claims.length - 10} 人`;
+      }
+    }
+
+    if (remainingCount > 0) {
+      messageText += `\n\n⬇️ 点击下方按钮抢红包！`;
+    }
+
     const keyboard: TelegramBot.InlineKeyboardMarkup = {
       inline_keyboard: [
         [
           {
-            text: `🎁 抢红包 (${claimedCount}/${totalCount})`,
+            text:
+              remainingCount > 0
+                ? `🎁 抢红包 (${claimedCount}/${totalCount})`
+                : `🎁 已抢完 (${claimedCount}/${totalCount})`,
             callback_data: `claim_packet:${packetId}`,
           },
         ],
@@ -1625,6 +1681,11 @@ ${txid ? `\n🔗 交易: \`${txid}\`` : ""}
     };
 
     try {
+      await this.bot.editMessageText(messageText, {
+        chat_id: message.chat.id,
+        message_id: message.message_id,
+        parse_mode: "Markdown",
+      });
       await this.bot.editMessageReplyMarkup(keyboard, {
         chat_id: message.chat.id,
         message_id: message.message_id,

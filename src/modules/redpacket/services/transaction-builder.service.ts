@@ -297,13 +297,36 @@ export class TransactionBuilderService {
       return { success: true, txid };
     } catch (error) {
       this.logger.error(`广播交易失败: ${error.message}`);
+
+      let errorMessage = "交易广播失败";
+
+      // 检测内存池交易过多错误
+      if (error.response?.data?.error?.message) {
+        const rpcError = error.response.data.error.message;
+        if (rpcError.includes("too-long-mempool-chain")) {
+          errorMessage = "当前网络交易较多，建议稍等1-2分钟后重试发红包";
+        } else if (rpcError.includes("dust")) {
+          errorMessage = "金额过低，请增加红包金额后重试";
+        } else {
+          errorMessage = rpcError;
+        }
+      } else if (error.message) {
+        if (error.message.includes("too-long-mempool-chain")) {
+          errorMessage = "当前网络交易较多，建议稍等1-2分钟后重试发红包";
+        } else if (error.message.includes("dust")) {
+          errorMessage = "金额过低，请增加红包金额后重试";
+        } else {
+          errorMessage = error.message;
+        }
+      }
+
       if (error.response) {
         this.logger.error(`RPC 响应状态: ${error.response.status}`);
         this.logger.error(
           `RPC 响应数据: ${JSON.stringify(error.response.data)}`,
         );
       }
-      return { success: false, txid: "", message: error.message };
+      return { success: false, txid: "", message: errorMessage };
     }
   }
 
@@ -389,8 +412,27 @@ export class TransactionBuilderService {
 
       return { success: true, txid };
     } catch (error) {
-      this.logger.error(`广播统筹账户交易失败: ${error.message}`);
-      return { success: false, txid: "", message: error.message };
+      this.logger.error(`广播交易失败: ${error.message}`);
+
+      let errorMessage = error.message;
+
+      // 检测内存池交易过多错误
+      if (error.response?.data?.error?.message) {
+        const rpcError = error.response.data.error.message;
+        if (rpcError.includes("too-long-mempool-chain")) {
+          errorMessage = "当前网络交易较多，建议稍等1-2分钟后重试发红包";
+        } else {
+          errorMessage = rpcError;
+        }
+      }
+
+      if (error.response) {
+        this.logger.error(`RPC 响应状态: ${error.response.status}`);
+        this.logger.error(
+          `RPC 响应数据: ${JSON.stringify(error.response.data)}`,
+        );
+      }
+      return { success: false, txid: "", message: errorMessage };
     }
   }
 

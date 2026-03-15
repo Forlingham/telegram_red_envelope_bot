@@ -70,15 +70,12 @@ export class RedpacketService {
 
   /**
    * 创建红包
-   *
-   * 红包类型处理逻辑：
-   * - DIRECT (定向红包): 直接转账给目标用户，不经过统筹账户
-   * - ACTIVITY_TOP (活跃红包): 直接转账给活跃用户，不经过统筹账户
-   * - GROUP_EQUAL/GROUP_RANDOM/ACTIVITY_LOTTERY (群红包): 先转到统筹账户，用户抢红包后再分配
    */
   async createRedPacket(input: CreateRedPacketInput): Promise<{
     success: boolean;
-    redPacket?: RedPacket;
+    redPacket?: RedPacket & {
+      sender: { username: string | null; telegramId: string } | null;
+    };
     message?: string;
     txid?: string;
     recipients?: {
@@ -149,7 +146,9 @@ export class RedpacketService {
     balance: Big,
   ): Promise<{
     success: boolean;
-    redPacket?: RedPacket;
+    redPacket?: RedPacket & {
+      sender: { username: string | null; telegramId: string } | null;
+    };
     message?: string;
     txid?: string;
     recipients?: {
@@ -328,6 +327,14 @@ export class RedpacketService {
           : RedPacketStatus.COMPLETED,
         expiredAt,
       },
+      include: {
+        sender: {
+          select: {
+            username: true,
+            telegramId: true,
+          },
+        },
+      },
     });
 
     // 创建领取记录（给有地址的用户）
@@ -451,7 +458,9 @@ export class RedpacketService {
     balance: Big,
   ): Promise<{
     success: boolean;
-    redPacket?: RedPacket;
+    redPacket?: RedPacket & {
+      sender: { username: string | null; telegramId: string } | null;
+    };
     message?: string;
     txid?: string;
   }> {
@@ -539,6 +548,14 @@ export class RedpacketService {
         rawTransaction: buildResult.rawTransaction,
         status: RedPacketStatus.ACTIVE,
         expiredAt,
+      },
+      include: {
+        sender: {
+          select: {
+            username: true,
+            telegramId: true,
+          },
+        },
       },
     });
 
@@ -1285,12 +1302,19 @@ export class RedpacketService {
    * 获取红包详情
    */
   async getRedPacketDetails(redPacketId: number): Promise<{
-    redPacket: RedPacket | null;
-    claims: RedPacketClaim[];
+    redPacket:
+      | (RedPacket & {
+          sender: { username: string | null; telegramId: string } | null;
+        })
+      | null;
+    claims: (RedPacketClaim & {
+      user: { username: string | null; telegramId: string };
+    })[];
     totalClaimed: string;
   }> {
     const redPacket = await this.prisma.redPacket.findUnique({
       where: { id: redPacketId },
+      include: { sender: true },
     });
 
     if (!redPacket) {
