@@ -257,19 +257,6 @@ export class WalletService {
       return { success: false, message: "用户没有绑定钱包" };
     }
 
-    // 检查钱包余额
-    const utxoService = new (
-      await import("../../blockchain/services/utxo.service")
-    ).UtxoService(this.prisma, this.configService);
-    const balance = await utxoService.getBalance(wallet.address, true);
-
-    if (balance.gt(0)) {
-      return {
-        success: false,
-        message: `钱包仍有余额 ${balance.toFixed(8)} SCASH，请先转出所有资金后再删除钱包`,
-      };
-    }
-
     // 检查是否有待处理的转账
     const pendingTransfers = await this.prisma.poolingTransfer.count({
       where: {

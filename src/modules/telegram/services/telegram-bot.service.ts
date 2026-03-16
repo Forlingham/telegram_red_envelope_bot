@@ -685,11 +685,28 @@ export class TelegramBotService implements OnModuleInit {
 
           if (result.success) {
             if (session.data.chatId.startsWith("-")) {
-              // 活跃红包需要传递 recipients 显示获得者
-              const recipients =
-                result.recipients && result.recipients.length > 0
-                  ? result.recipients
-                  : undefined;
+              let recipients = result.recipients;
+
+              // 定向红包需要特殊处理，查询目标用户的 firstName
+              if (
+                result.redPacket.type === RedPacketType.DIRECT &&
+                session.data.targetUsers?.[0]
+              ) {
+                const targetUser = await this.prisma.user.findUnique({
+                  where: { telegramId: session.data.targetUsers[0] },
+                });
+                if (targetUser) {
+                  recipients = [
+                    {
+                      telegramId: targetUser.telegramId,
+                      username: targetUser.username,
+                      firstName: targetUser.firstName,
+                      amount: result.redPacket.totalAmount.toString(),
+                    },
+                  ];
+                }
+              }
+
               await this.sendRedPacketToGroup(
                 result.redPacket,
                 session.data.chatId,
@@ -835,7 +852,9 @@ export class TelegramBotService implements OnModuleInit {
             session.data.type === RedPacketType.DIRECT &&
             session.data.targetUsers
           ) {
-            confirmMessage += `\n目标用户: @${session.data.targetUsers.join(", @")}`;
+            const displayTarget =
+              session.data.targetUsername || session.data.targetUsers[0];
+            confirmMessage += `\n目标用户: @${displayTarget}`;
           }
 
           // 活跃红包/抽奖红包显示中奖人数和范围
@@ -1068,7 +1087,24 @@ export class TelegramBotService implements OnModuleInit {
             return;
           }
 
-          session.data.targetUsers = usernames;
+          // 验证目标用户是否存在于数据库
+          const targetUsername = usernames[0];
+          const targetUser = await this.prisma.user.findFirst({
+            where: {
+              OR: [{ username: targetUsername }, { firstName: targetUsername }],
+            },
+          });
+
+          if (!targetUser) {
+            this.bot.sendMessage(
+              msg.chat.id,
+              `❌ 未找到用户 @${targetUsername}\n\n请确认对方是否已使用过机器人（需要先与机器人交互过）`,
+            );
+            return;
+          }
+
+          session.data.targetUsers = [targetUser.telegramId];
+          session.data.targetUsername = targetUsername;
           session.data.count = 1; // 定向红包固定 1 份
 
           // 定向红包输入金额
@@ -1301,7 +1337,9 @@ export class TelegramBotService implements OnModuleInit {
             session.data.type === RedPacketType.DIRECT &&
             session.data.targetUsers
           ) {
-            confirmMessage += `\n目标用户: @${session.data.targetUsers.join(", @")}`;
+            const displayTarget =
+              session.data.targetUsername || session.data.targetUsers[0];
+            confirmMessage += `\n目标用户: @${displayTarget}`;
           }
 
           // 活跃红包/抽奖红包显示中奖人数和范围
@@ -1511,7 +1549,12 @@ export class TelegramBotService implements OnModuleInit {
     redPacket: any,
     chatId: string,
     txid?: string,
-    recipients?: { telegramId: string; username?: string; amount: string }[],
+    recipients?: {
+      telegramId: string;
+      username?: string | null;
+      firstName?: string | null;
+      amount?: string;
+    }[],
   ) {
     const typeLabels = {
       [RedPacketType.DIRECT]: "🎯 定向红包",
@@ -1570,12 +1613,18 @@ ${recipientsText}
       const targetUsers = redPacket.targetUsers
         ? JSON.parse(redPacket.targetUsers)
         : [];
+      let targetDisplay = targetUsers[0] || "未知";
+      if (recipients && recipients[0]) {
+        targetDisplay =
+          recipients[0].firstName ||
+          `@${recipients[0].username || targetUsers[0]}`;
+      }
       message = `
 🎯 定向红包
 
 👤 发红包: ${senderInfo}
 💰 金额: ${redPacket.totalAmount} SCASH
-👤 接收: @${targetUsers[0] || "未知"}
+👤 接收: ${targetDisplay}
 💬 ${redPacket.message}
 ${txid ? `\n🔗 交易: \`${txid}\`` : ""}
       `;

@@ -135,7 +135,7 @@ export class UtxoService {
     const utxos = await this.prisma.utxo.findMany({
       where: whereClause,
       orderBy: {
-        amount: "asc", // 优先使用小额 UTXO
+        blockHeight: "asc", // 优先使用最早的 UTXO
       },
     });
 

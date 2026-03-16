@@ -81,6 +81,7 @@ export class RedpacketService {
     recipients?: {
       telegramId: string;
       username: string | null;
+      firstName: string | null;
       amount: string;
     }[];
   }> {
@@ -154,6 +155,7 @@ export class RedpacketService {
     recipients?: {
       telegramId: string;
       username: string | null;
+      firstName: string | null;
       amount: string;
     }[];
   }> {
