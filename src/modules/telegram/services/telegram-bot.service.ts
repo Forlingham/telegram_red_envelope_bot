@@ -1553,6 +1553,7 @@ export class TelegramBotService implements OnModuleInit {
       telegramId: string;
       username?: string | null;
       firstName?: string | null;
+      lastName?: string | null;
       amount?: string;
     }[],
   ) {
@@ -1589,9 +1590,11 @@ export class TelegramBotService implements OnModuleInit {
       if (recipients && recipients.length > 0) {
         recipientsText = "\n🎉 获得者：\n";
         recipients.forEach((r, index) => {
-          const displayName = r.username
+          let displayName = r.username
             ? `@${r.username}`
-            : (r as any).firstName || `用户${r.telegramId.slice(-4)}`;
+            : r.firstName
+              ? `${r.lastName || ""} ${r.firstName}`.trim()
+              : r.telegramId;
           const statusText =
             (r as any).status === "待绑定" ? " (待绑定地址)" : "";
           recipientsText += `${index + 1}. ${displayName}: ${r.amount} SCASH${statusText}\n`;
@@ -1697,10 +1700,14 @@ ${txid ? `\n🔗 交易: \`${txid}\`` : ""}
     if (details.claims.length > 0) {
       const claimedList = details.claims
         .slice(0, 10)
-        .map(
-          (c) =>
-            `• @${c.user.username || c.user.telegramId}: ${c.amount} SCASH`,
-        )
+        .map((c) => {
+          let displayName = c.user.username
+            ? `@${c.user.username}`
+            : c.user.firstName
+              ? `${c.user.lastName || ""} ${c.user.firstName}`.trim()
+              : c.user.telegramId;
+          return `• ${displayName}: ${c.amount} SCASH`;
+        })
         .join("\n");
 
       messageText += `\n`;

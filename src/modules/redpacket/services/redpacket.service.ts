@@ -1310,7 +1310,12 @@ export class RedpacketService {
         })
       | null;
     claims: (RedPacketClaim & {
-      user: { username: string | null; telegramId: string };
+      user: {
+        username: string | null;
+        telegramId: string;
+        firstName: string | null;
+        lastName: string | null;
+      };
     })[];
     totalClaimed: string;
   }> {
