@@ -13,7 +13,13 @@ import {
   TransferStatus,
 } from "../../../shared/constants/network.constants";
 import Big from "big.js";
-import { RedPacket, RedPacketClaim, User, Prisma } from "@prisma/client";
+import {
+  RedPacket,
+  RedPacketClaim,
+  User,
+  Prisma,
+  ClaimStatus,
+} from "@prisma/client";
 
 interface CreateRedPacketInput {
   senderId: number;
@@ -1251,6 +1257,121 @@ export class RedpacketService {
     }
 
     return result;
+  }
+
+  /**
+   * 处理单个用户的待转账（当用户绑定钱包后调用）
+   */
+  async processUserPendingTransfer(userId: number): Promise<{
+    success: boolean;
+    processedCount: number;
+    totalAmount: string;
+    message: string;
+  }> {
+    const pendingTransfers = await this.prisma.poolingTransfer.findMany({
+      where: {
+        userId,
+        status: {
+          in: [
+            TransferStatus.PENDING,
+            TransferStatus.PROCESSING,
+            TransferStatus.RETRYING,
+            TransferStatus.FAILED,
+          ],
+        },
+      },
+    });
+
+    if (pendingTransfers.length === 0) {
+      return {
+        success: true,
+        processedCount: 0,
+        totalAmount: "0",
+        message: "没有待处理的转账",
+      };
+    }
+
+    const userWallet = await this.walletService.getWalletByUserId(userId);
+    if (!userWallet) {
+      return {
+        success: false,
+        processedCount: 0,
+        totalAmount: "0",
+        message: "用户没有绑定钱包",
+      };
+    }
+
+    const totalAmount = pendingTransfers.reduce(
+      (sum, t) => sum.plus(t.amount.toString()),
+      new Big(0),
+    );
+
+    try {
+      const buildResult = await this.txBuilder.buildPoolingTransferTransaction(
+        pendingTransfers.map((t) => ({
+          userId: t.userId,
+          address: userWallet.address,
+          amount: new Big(t.amount.toString()),
+        })),
+        DEFAULT_CONFIG.FEE_RATE,
+      );
+
+      if (!buildResult) {
+        return {
+          success: false,
+          processedCount: 0,
+          totalAmount: totalAmount.toFixed(8),
+          message: "构建转账交易失败",
+        };
+      }
+
+      const broadcastResult =
+        await this.txBuilder.broadcastPoolingTransaction(buildResult);
+
+      if (!broadcastResult.success) {
+        return {
+          success: false,
+          processedCount: 0,
+          totalAmount: totalAmount.toFixed(8),
+          message: `广播失败: ${broadcastResult.message}`,
+        };
+      }
+
+      for (const transfer of pendingTransfers) {
+        await this.prisma.poolingTransfer.update({
+          where: { id: transfer.id },
+          data: {
+            status: TransferStatus.COMPLETED,
+            txid: broadcastResult.txid,
+            processedAt: new Date(),
+          },
+        });
+
+        if (transfer.claimId) {
+          await this.prisma.redPacketClaim.update({
+            where: { id: transfer.claimId },
+            data: {
+              status: ClaimStatus.COMPLETED,
+              txid: broadcastResult.txid,
+            },
+          });
+        }
+      }
+
+      return {
+        success: true,
+        processedCount: pendingTransfers.length,
+        totalAmount: totalAmount.toFixed(8),
+        message: `成功转账 ${pendingTransfers.length} 笔，共 ${totalAmount.toFixed(8)} SCASH`,
+      };
+    } catch (error: any) {
+      return {
+        success: false,
+        processedCount: 0,
+        totalAmount: totalAmount.toFixed(8),
+        message: `转账失败: ${error.message}`,
+      };
+    }
   }
 
   /**

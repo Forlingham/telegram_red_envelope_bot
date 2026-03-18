@@ -272,11 +272,16 @@ export class TelegramBotService implements OnModuleInit {
 
       try {
         await this.walletService.bindWatchOnlyAddress(user.id, address);
-        this.bot.sendMessage(
-          chatId,
-          `✅ 钱包绑定成功！\n\n地址: \`${address}\`\n\n你现在可以抢红包了。`,
-          { parse_mode: "Markdown" },
-        );
+
+        const transferResult =
+          await this.redpacketService.processUserPendingTransfer(user.id);
+
+        let message = `✅ 钱包绑定成功！\n\n地址: \`${address}\`\n\n你现在可以抢红包了。`;
+        if (transferResult.processedCount > 0) {
+          message += `\n\n💰 已自动转入 ${transferResult.totalAmount} SCASH`;
+        }
+
+        this.bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
       } catch (error) {
         this.bot.sendMessage(chatId, `❌ 绑定失败: ${error.message}`);
       }
@@ -313,7 +318,10 @@ export class TelegramBotService implements OnModuleInit {
       try {
         const walletInfo = await this.walletService.createWallet(user.id);
 
-        const message = `
+        const transferResult =
+          await this.redpacketService.processUserPendingTransfer(user.id);
+
+        let message = `
 ✅ 钱包创建成功！
 
 📍 地址: \`${walletInfo.address}\`
@@ -329,6 +337,10 @@ export class TelegramBotService implements OnModuleInit {
 
 ✨ 你现在可以发送和接收红包了！
         `;
+
+        if (transferResult.processedCount > 0) {
+          message += `\n\n💰 已自动转入 ${transferResult.totalAmount} SCASH`;
+        }
 
         this.bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
       } catch (error) {
@@ -1040,17 +1052,24 @@ export class TelegramBotService implements OnModuleInit {
             text,
           );
 
-          this.bot.sendMessage(
-            msg.chat.id,
-            `
+          const transferResult =
+            await this.redpacketService.processUserPendingTransfer(user.id);
+
+          let message = `
 ✅ 钱包导入成功！
 
 📍 地址: \`${walletInfo.address}\`
 
 你现在可以发送红包了。
-          `,
-            { parse_mode: "Markdown" },
-          );
+          `;
+
+          if (transferResult.processedCount > 0) {
+            message += `\n\n💰 已自动转入 ${transferResult.totalAmount} SCASH`;
+          }
+
+          this.bot.sendMessage(msg.chat.id, message, {
+            parse_mode: "Markdown",
+          });
 
           this.userSessions.delete(userId);
         } catch (error) {
